@@ -14,7 +14,8 @@ LOCK_FILE="/var/lock/glm53-complete.lock"
 
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl gnupg jq openssl rsync util-linux
-install -m 0660 /dev/null "$LOCK_FILE"
+touch "$LOCK_FILE"
+chmod 0660 "$LOCK_FILE"
 exec 9>"$LOCK_FILE"
 flock -n 9 || die "Outra instalação/atualização GLM-5.3 já está em execução."
 
@@ -111,6 +112,7 @@ ensure_env_key MIN_DOCKER_FREE_DISK_GIB "100"
 ensure_env_key MIN_VLLM_CACHE_FREE_DISK_GIB "30"
 ensure_env_key MIN_DEEPGEMM_CACHE_FREE_DISK_GIB "20"
 replace_env_exact VLLM_BASE_IMAGE "vllm/vllm-openai:v0.28.0" "vllm/vllm-openai@sha256:2286e8533ca8b6bc777594bae30524f1426ba46ca21797524e06df6a94b06635"
+replace_env_exact NGINX_IMAGE "nginx:1.29-alpine" "nginx@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de"
 replace_env_exact MODEL_REVISION "main" "187fb9fff6319062325ff825627ef6db084d9bc6"
 replace_env_exact VLLM_IMAGE "vllm/vllm-openai:v0.28.0" "glm53-complete-vllm:0.28.0-deepgemm"
 
@@ -189,7 +191,11 @@ if [[ "$ROOT_DIR" != "$INSTALL_DIR" ]]; then
   fi
   chmod 0755 "$INSTALL_DIR"/install.sh "$INSTALL_DIR"/manage.sh "$INSTALL_DIR"/healthcheck.sh "$INSTALL_DIR"/test-api.sh "$INSTALL_DIR"/info "$INSTALL_DIR"/scripts/*.sh
   ln -sfn "$INSTALL_DIR/info" /usr/local/bin/glm-info
-  ln -sfn "$INSTALL_DIR/manage.sh" /usr/local/bin/glm-manage
+  cat >/usr/local/bin/glm-manage <<MANAGE_WRAPPER
+#!/usr/bin/env bash
+exec "$INSTALL_DIR/manage.sh" "\$@"
+MANAGE_WRAPPER
+  chmod 0755 /usr/local/bin/glm-manage
   rm -f "$ROOT_DIR/.env"
   ln -s "$INSTALL_DIR/.env" "$ROOT_DIR/.env"
   chown -h "$OWNER_USER:$OWNER_GROUP" "$ROOT_DIR/.env"
@@ -200,7 +206,11 @@ if [[ "$ROOT_DIR" != "$INSTALL_DIR" ]]; then
   docker compose -f "$INSTALL_DIR/docker-compose.yml" --env-file "$INSTALL_DIR/.env" up -d --no-deps --force-recreate --pull never gateway
 else
   ln -sfn "$ROOT_DIR/info" /usr/local/bin/glm-info
-  ln -sfn "$ROOT_DIR/manage.sh" /usr/local/bin/glm-manage
+  cat >/usr/local/bin/glm-manage <<MANAGE_WRAPPER
+#!/usr/bin/env bash
+exec "$ROOT_DIR/manage.sh" "\$@"
+MANAGE_WRAPPER
+  chmod 0755 /usr/local/bin/glm-manage
 fi
 
 cat <<MSG
