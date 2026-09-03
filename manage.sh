@@ -23,7 +23,8 @@ validate_runtime_image() {
 }
 
 wait_for_api() {
-  local timeout_sec="${1:-${VLLM_ENGINE_READY_TIMEOUT_S:-7200}}" deadline=$((SECONDS + ${1:-${VLLM_ENGINE_READY_TIMEOUT_S:-7200}}))
+  local timeout_sec="${1:-${VLLM_ENGINE_READY_TIMEOUT_S:-7200}}"
+  local deadline=$((SECONDS + timeout_sec))
   while (( SECONDS < deadline )); do
     if "$ROOT_DIR/healthcheck.sh" >/dev/null 2>&1; then return 0; fi
     sleep 10
@@ -33,12 +34,16 @@ wait_for_api() {
 
 diagnose() {
   printf '%s\n' "=== Sistema ==="
-  [[ -r /etc/os-release ]] && grep -E '^(PRETTY_NAME|VERSION_ID)=' /etc/os-release || true
+  if [[ -r /etc/os-release ]]; then
+    grep -E '^(PRETTY_NAME|VERSION_ID)=' /etc/os-release || true
+  fi
   uname -srmo || true
   printf '\n%s\n' "=== NVIDIA ==="
   nvidia-smi --query-gpu=index,name,driver_version,memory.total,memory.used,utilization.gpu --format=csv || true
   printf '\n%s\n' "=== Docker ==="
-  docker --version || true; docker compose version || true; docker info --format 'DockerRootDir={{.DockerRootDir}}' 2>/dev/null || true
+  docker --version || true
+  docker compose version || true
+  docker info --format 'DockerRootDir={{.DockerRootDir}}' 2>/dev/null || true
   printf '\n%s\n' "=== Imagem vLLM ==="
   docker image inspect "${VLLM_IMAGE:-vllm/vllm-openai:v0.28.0}" --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null || true
   printf '\n%s\n' "=== Modelo configurado ==="
@@ -53,15 +58,20 @@ diagnose() {
 
 show_info() {
   local origin status gpu_count gpu_names host_ip remote_url
-  origin="$(api_origin)"; status="OFFLINE"
+  origin="$(api_origin)"
+  status="OFFLINE"
   if curl -fsS --max-time 4 -H "Authorization: Bearer ${API_KEY}" "${origin}/v1/models" >/dev/null 2>&1; then status="ONLINE"; fi
   gpu_count="$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l | tr -d ' ' || true)"
   gpu_names="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sort -u | paste -sd ',' - | sed 's/,/, /g' || true)"
   host_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)"
-  [[ -n "$host_ip" ]] || host_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  if [[ -z "$host_ip" ]]; then
+    host_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  fi
   case "${BIND_ADDRESS:-127.0.0.1}" in
     127.0.0.1|localhost) remote_url="DESATIVADO (API somente local)" ;;
-    0.0.0.0) [[ -n "$host_ip" ]] && remote_url="http://${host_ip}:${API_PORT:-8000}/v1" || remote_url="http://IP_DA_VM:${API_PORT:-8000}/v1" ;;
+    0.0.0.0)
+      if [[ -n "$host_ip" ]]; then remote_url="http://${host_ip}:${API_PORT:-8000}/v1"; else remote_url="http://IP_DA_VM:${API_PORT:-8000}/v1"; fi
+      ;;
     *) remote_url="http://${BIND_ADDRESS}:${API_PORT:-8000}/v1" ;;
   esac
   cat <<INFO
@@ -108,7 +118,9 @@ glm-info                 Mostrar este painel de qualquer pasta
 ./manage.sh key          Mostrar somente a API key
 ============================================================
 INFO
-  if [[ "${BIND_ADDRESS:-127.0.0.1}" == "127.0.0.1" ]]; then warn "A API está somente local. Para agentes remotos, configure VNet/VPN/NSG/TLS conforme SECURITY.md."; fi
+  if [[ "${BIND_ADDRESS:-127.0.0.1}" == "127.0.0.1" ]]; then
+    warn "A API está somente local. Para agentes remotos, configure VNet/VPN/NSG/TLS conforme SECURITY.md."
+  fi
 }
 
 rollback_vllm_image() {
@@ -127,25 +139,67 @@ safe_update() {
   new_vllm_id="$(docker image inspect "$image" --format '{{.Id}}' 2>/dev/null || true)"
   [[ -n "$new_vllm_id" ]] || die "Imagem vLLM indisponível após pull."
   if ! validate_runtime_image; then
-    [[ -z "$old_vllm_id" || "$old_vllm_id" == "$new_vllm_id" ]] || docker tag "$old_vllm_id" "$image" || true
+    if [[ -n "$old_vllm_id" && "$old_vllm_id" != "$new_vllm_id" ]]; then
+      docker tag "$old_vllm_id" "$image" || true
+    fi
     die "A imagem nova falhou na validação de runtime."
   fi
-  if [[ -n "$old_vllm_id" && "$old_vllm_id" == "$new_vllm_id" ]]; then log "A imagem já está atualizada."; return 0; fi
+  if [[ -n "$old_vllm_id" && "$old_vllm_id" == "$new_vllm_id" ]]; then
+    log "A imagem já está atualizada."
+    return 0
+  fi
   docker compose --env-file .env up -d --force-recreate --pull never
   timeout_sec="${VLLM_ENGINE_READY_TIMEOUT_S:-7200}"
-  if wait_for_api "$timeout_sec" && "$ROOT_DIR/test-api.sh"; then log "Atualização concluída e validada."; return 0; fi
-  if [[ -n "$old_vllm_id" && "$old_vllm_id" != "$new_vllm_id" ]]; then warn "Atualização rejeitada; restaurando imagem anterior."; rollback_vllm_image "$old_vllm_id" || true; fi
+  if wait_for_api "$timeout_sec"; then
+    if "$ROOT_DIR/test-api.sh"; then
+      log "Atualização concluída e validada."
+      return 0
+    fi
+  fi
+  if [[ -n "$old_vllm_id" && "$old_vllm_id" != "$new_vllm_id" ]]; then
+    warn "Atualização rejeitada; restaurando imagem anterior."
+    rollback_vllm_image "$old_vllm_id" || true
+  fi
   die "Atualização falhou. Execute ./manage.sh logs e ./manage.sh diagnose."
 }
 
 case "${1:-status}" in
-  start) require_docker_access "$@"; validate_deployment_config; docker compose --env-file .env up -d --pull never ;;
-  stop) require_docker_access "$@"; docker compose --env-file .env stop ;;
-  restart|apply) require_docker_access "$@"; validate_deployment_config; docker compose --env-file .env up -d --force-recreate --pull never ;;
-  status) require_docker_access "$@"; docker compose --env-file .env ps; nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu --format=csv ;;
-  logs) require_docker_access "$@"; docker compose --env-file .env logs -f --tail=200 vllm gateway ;;
-  pull|update) require_docker_access "$@"; safe_update ;;
-  wait) timeout_sec="${VLLM_ENGINE_READY_TIMEOUT_S:-7200}"; log "Aguardando API (limite ${timeout_sec}s)..."; wait_for_api "$timeout_sec" && "$ROOT_DIR/healthcheck.sh" || die "API não ficou pronta; execute ./manage.sh logs." ;;
+  start)
+    require_docker_access "$@"
+    validate_deployment_config
+    docker compose --env-file .env up -d --pull never
+    ;;
+  stop)
+    require_docker_access "$@"
+    docker compose --env-file .env stop
+    ;;
+  restart|apply)
+    require_docker_access "$@"
+    validate_deployment_config
+    docker compose --env-file .env up -d --force-recreate --pull never
+    ;;
+  status)
+    require_docker_access "$@"
+    docker compose --env-file .env ps
+    nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu --format=csv
+    ;;
+  logs)
+    require_docker_access "$@"
+    docker compose --env-file .env logs -f --tail=200 vllm gateway
+    ;;
+  pull|update)
+    require_docker_access "$@"
+    safe_update
+    ;;
+  wait)
+    timeout_sec="${VLLM_ENGINE_READY_TIMEOUT_S:-7200}"
+    log "Aguardando API (limite ${timeout_sec}s)..."
+    if wait_for_api "$timeout_sec"; then
+      "$ROOT_DIR/healthcheck.sh"
+    else
+      die "API não ficou pronta; execute ./manage.sh logs."
+    fi
+    ;;
   test) "$ROOT_DIR/test-api.sh" ;;
   diagnose) require_docker_access "$@"; diagnose ;;
   info) show_info ;;
