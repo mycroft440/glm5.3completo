@@ -102,21 +102,22 @@ docker run --rm --gpus all --entrypoint python3 "${VLLM_IMAGE:-vllm/vllm-openai:
 
 log "Subindo GLM-5.3 completo..."
 docker compose --env-file .env up -d --pull never
+
 cat <<MSG
 
-Instalação iniciada.
-O primeiro boot precisa baixar aproximadamente 893 GB de pesos FP8.
+Instalação iniciada com sucesso.
+O primeiro boot precisa baixar aproximadamente 893 GB de pesos FP8 para:
+  ${HF_CACHE_PATH}
 
-Informações da API:
-  glm-info
-
-Acompanhar:
+A carga do modelo continua em segundo plano. Para acompanhar:
   ./manage.sh logs
   ./manage.sh wait
   ./manage.sh test
 
-Endpoint local padrão:
-  http://${BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8000}/v1
+O comando global abaixo pode ser usado de qualquer pasta:
+  glm-info
 
-A API key fica em .env (modo 600) e também pode ser vista com glm-info.
+O painel completo da API será exibido agora. Como o modelo ainda pode estar baixando/carregando, o Status pode aparecer como OFFLINE até a inicialização terminar.
 MSG
+
+"$ROOT_DIR/manage.sh" info
