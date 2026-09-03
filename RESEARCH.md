@@ -2,135 +2,126 @@
 
 Data da revisão: 2026-09-03.
 
-## Modelo e perfil oficial
+## Modelo e perfil
 
-O GLM-5.3 completo é um MoE de aproximadamente **743B parâmetros totais / 39B ativos**, com janela nativa de **1.048.576 tokens**. O checkpoint padrão `zai-org/GLM-5.3` é FP8 e o recipe oficial atual exige **vLLM 0.28.0+**.
+O GLM-5.3 completo é um MoE de aproximadamente **743B parâmetros totais / 39B ativos**, checkpoint padrão FP8 com footprint publicado em torno de **893 GB** e contexto declarado de até 1.048.576 tokens.
 
-Para NVIDIA, o caminho FP8 single-node documentado é:
+O recipe atual do vLLM usa como perfil FP8 single-node:
 
-- 8× H200/H20 de 141 GB;
-- `zai-org/GLM-5.3` FP8;
+- 8× NVIDIA H200/H20;
 - Tensor Parallel 8;
 - KV cache FP8;
-- MTP com 5 draft tokens;
-- parser de tools `glm47`;
-- parser de reasoning `glm45`.
+- MTP com 5 tokens;
+- `--tool-call-parser glm47`;
+- `--reasoning-parser glm45`;
+- DeepGEMM no caminho FP8 de desempenho.
 
-O projeto verifica vLLM >=0.28.0 e Transformers >=5.15.0.
+Este projeto fixa o checkpoint em `187fb9fff6319062325ff825627ef6db084d9bc6` e começa com 131.072 tokens, 8 sequências e 8.192 tokens por lote.
 
 Fonte principal: https://recipes.vllm.ai/zai-org/GLM-5.3
 
-## Contexto e concorrência
+## Runtime e reprodutibilidade
 
-Embora o modelo declare até 1M tokens, a capacidade prática é limitada por pesos, KV cache, workspaces e concorrência. O recipe associa explicitamente **8×B200** ao perfil de contexto integral de 1M. Por isso o perfil H200 deste projeto começa em:
+Base x86_64 do vLLM 0.28.0:
 
 ```text
-MAX_MODEL_LEN=131072
-MAX_NUM_SEQS=8
-MAX_NUM_BATCHED_TOKENS=8192
+vllm/vllm-openai@sha256:2286e8533ca8b6bc777594bae30524f1426ba46ca21797524e06df6a94b06635
 ```
 
-O `max-num-batched-tokens=8192` também coincide com o valor apresentado pelo recipe como um ponto de partida comum. Existe ainda um motivo de estabilidade: uma issue recente de GLM FP8 em 8×H200 mostrou que o workspace do caminho sparse-decode podia crescer com `max_num_batched_tokens` e provocar OOM tardio. A correção upstream foi incorporada depois do commit do tag vLLM 0.28.0; portanto este projeto mantém um limite explícito e conservador em vez de depender de defaults mutáveis.
+Gateway:
+
+```text
+nginx@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
+```
+
+DeepGEMM:
+
+```text
+VLLM_SOURCE_REF=2cf0a6915ce544dc493a0990f2ea38d81601128a
+DEEPGEMM_REF=8b1392b978f5a03c828dd1711090d7fb50958b8a
+```
+
+Esses pins eliminam mudanças silenciosas nas entradas principais do runtime. Pacotes APT usados apenas no build ainda vêm do snapshot do repositório Ubuntu disponível no momento da construção; portanto o build não é declarado bit-a-bit hermético.
+
+## DeepGEMM e submódulos
+
+O instalador de DeepGEMM do vLLM 0.28.0 clona `--recursive` antes de fazer checkout do commit escolhido. Sem uma segunda sincronização, submódulos podem refletir o estado inicialmente clonado em vez dos SHAs gravados no commit alvo.
+
+O Dockerfile deste projeto insere após o checkout:
+
+```bash
+git submodule sync --recursive
+git submodule update --init --recursive --force
+```
+
+O cache JIT também é persistido via `DG_JIT_CACHE_DIR=/root/.cache/deepgemm` para `/var/lib/glm53-full/deepgemm-cache`.
+
+## OOM sparse-decode / FlashMLA
+
+O bug vLLM #53413 afetou o workspace do caminho sparse-decode. A correção PR #53755, incorporada depois do tag 0.28.0, troca no build do vLLM o FlashMLA:
+
+```text
+a8f794d1251cbfd88a5011445dd5582289c727e4
+→
+0397728d511c4e3d94ea3a01d8dda8654525a611
+```
+
+Como a imagem 0.28.0 já possui extensões compiladas, editar apenas a referência de fonte numa imagem derivada **não** seria um backport verdadeiro. O projeto mantém 0.28.0 como base estável do recipe e limita `MAX_NUM_BATCHED_TOKENS=8192` como mitigação conservadora até validar um release/imagem estável que já contenha a correção compilada. Teste de stress prolongado na H200 continua obrigatório.
 
 Referências:
-- https://recipes.vllm.ai/zai-org/GLM-5.3
 - https://github.com/vllm-project/vllm/issues/53413
 - https://github.com/vllm-project/vllm/pull/53755
 
-## DeepGEMM
+## Compatibilidade de agentes
 
-A revisão anterior dizia, incorretamente, que bastava depender dos componentes já integrados ao vLLM. O recipe atual é explícito: **DeepGEMM é requerido para o caminho de desempenho FP8 e deve ser instalado via `install_deepgemm.sh`**.
+Dois problemas upstream foram considerados:
 
-O tag vLLM 0.28.0 aponta para o commit:
+1. `assistant.content=null + tool_calls` pode chegar ao chat template e renderizar `None`. PR upstream: #54368.
+2. `enable_thinking=false` / `thinking=false` podem desarmar a extração do parser enquanto GLM-5.3 continua emitindo thinking, causando vazamento do scratchpad. PR upstream: #54825.
 
-```text
-2cf0a6915ce544dc493a0990f2ea38d81601128a
-```
+O runtime derivado normaliza o primeiro caso no servidor. Para o segundo, este perfil GLM-only rejeita essas flags antigas com erro de validação e exige `reasoning_effort`.
 
-O instalador oficial `tools/install_deepgemm.sh` desse commit fixa DeepGEMM em:
-
-```text
-8b1392b978f5a03c828dd1711090d7fb50958b8a
-```
-
-Por isso este repositório agora constrói uma imagem derivada local:
-
-```text
-Base:    vllm/vllm-openai:v0.28.0
-Runtime: glm53-complete-vllm:0.28.0-deepgemm
-```
-
-O `Dockerfile` baixa o instalador do commit exato do vLLM, compila/instala o commit exato do DeepGEMM e falha o build se `import deep_gemm` não funcionar. O `install.sh` e `manage.sh update` validam novamente DeepGEMM com GPU antes de iniciar/trocar o servidor.
-
-## CUDA 13 versus driver da imagem Azure HPC
-
-A imagem oficial vLLM 0.28.0 usa CUDA 13. A documentação da Azure HPC ainda lista, para sua imagem publicada, driver NVIDIA 535.161.08 e CUDA 12.4. Em GPUs datacenter, vLLM oferece CUDA forward compatibility através de `VLLM_ENABLE_CUDA_COMPATIBILITY=1`.
-
-O `.env.example` usa:
-
-```text
-VLLM_ENABLE_CUDA_COMPATIBILITY=auto
-```
-
-Durante a instalação:
-
-- driver abaixo da série R580 -> `1`;
-- R580 ou mais novo -> `0`.
-
-A escolha concreta é salva no `.env` antes do preflight e antes do primeiro import de PyTorch. Isto evita depender da versão atualmente documentada da imagem Azure e também evita carregar compat libraries sem necessidade em drivers futuros.
+O smoke test envia deliberadamente um histórico `assistant.content=null`, executa o resultado da ferramenta e valida a resposta final. Também testa streaming e rejeita tags `<think>` no conteúdo final.
 
 Referências:
-- https://learn.microsoft.com/azure/virtual-machines/azure-hpc-vm-images
-- https://docs.vllm.ai/en/v0.28.0/deployment/docker/
+- https://github.com/vllm-project/vllm/pull/54368
+- https://github.com/vllm-project/vllm/pull/54825
 
-## Docker e isolamento
+## Azure H200
 
-Para NVIDIA, a documentação do vLLM exige acesso às GPUs e recomenda `--ipc=host`; modo `privileged` não é necessário para este caminho. O container vLLM deste projeto **não usa mais `privileged: true`**. A porta do vLLM permanece somente na rede Docker interna e o Nginx publica apenas `/v1/`.
+VM de referência: `Standard_ND96isr_H200_v5`, 8× H200 de 141 GB.
+
+A imagem Azure HPC A100+ mais recente encontrada nesta revisão é:
+
+```text
+microsoft-dsvm:ubuntu-hpc:2404:24.04.2026072901
+```
+
+Release 2026072901 (06/08/2026): driver NVIDIA 580.173.02, Fabric Manager 580.173.02, CUDA 13.0.88, NCCL 2.30.4-1 e Docker/Moby 29.6.2.
+
+Fonte: https://github.com/Azure/azhpc-images/releases
+
+O instalador conserva lógica de forward compatibility para VMs antigas: driver < R580 ativa `VLLM_ENABLE_CUDA_COMPATIBILITY=1`; R580+ usa 0.
+
+## Hardware fail-closed
+
+O baseline valida exatamente 8 GPUs H200 homogêneas, >=130000 MiB por GPU, >=1400 GiB de RAM do host, NVLink/NVSwitch visível e Fabric Manager ativo. Essa rigidez é proposital para não transformar um instalador H200 em um “tentar rodar em qualquer GPU”.
 
 ## Armazenamento
 
-O recipe classifica o checkpoint FP8 em aproximadamente **893 GB**. Este projeto exige, por padrão:
-
-- 1.200 GiB livres para pesos/cache Hugging Face;
-- 100 GiB para Docker/imagens;
-- 30 GiB para cache vLLM/compilação.
-
-Quando os três consumidores compartilham filesystem, o mínimo agregado é **1.330 GiB livres**. A recomendação operacional permanece **2 TiB persistentes** para suportar o checkpoint, a imagem derivada, caches, logs e atualizações com imagem candidata.
-
-## Azure H200 / Fabric Manager
-
-O alvo padrão é `Standard_ND96isr_H200_v5`, com 8×H200. O preflight valida número de GPUs e VRAM. Se o NVIDIA Fabric Manager estiver instalado mas inativo, o instalador emite aviso, pois isso pode afetar comunicação NVSwitch/multi-GPU. `./manage.sh diagnose` também mostra `nvidia-smi topo -m`.
-
-## Quantização NVFP4
-
-O checkpoint `Inferact/GLM-5.3-NVFP4` é uma alternativa Blackwell, com footprint muito menor que FP8. Ele não é o default deste repositório porque o objetivo aqui é manter o caminho single-node FP8 explicitamente documentado para H200. Um perfil GB200/NVFP4 deve ser tratado e testado separadamente.
-
-Referências:
-- https://recipes.vllm.ai/zai-org/GLM-5.3
-- https://huggingface.co/Inferact/GLM-5.3-NVFP4
-
-## Recursos recentes propositalmente não ativados
-
-A triagem de issues recentes mostrou problemas em caminhos como DCP e KV offloading. O perfil inicial deste projeto não ativa DCP, KV offload nem outras otimizações experimentais. A estratégia é estabelecer primeiro um baseline estável TP=8/H200 e adicionar otimizações apenas depois de medições reais.
-
-## Reprodutibilidade
-
-Antes do primeiro teste H200:
+Reservas padrão se todos os consumidores estiverem no mesmo filesystem:
 
 ```text
-VLLM_BASE_IMAGE=vllm/vllm-openai:v0.28.0
-VLLM_SOURCE_REF=2cf0a6915ce544dc493a0990f2ea38d81601128a
-DEEPGEMM_REF=8b1392b978f5a03c828dd1711090d7fb50958b8a
-VLLM_IMAGE=glm53-complete-vllm:0.28.0-deepgemm
-MODEL_REVISION=main
+Hugging Face / pesos     1200 GiB
+Docker / imagens          100 GiB
+cache vLLM                 30 GiB
+cache DeepGEMM JIT         20 GiB
+-------------------------------
+total mínimo             1350 GiB
 ```
 
-Depois do primeiro carregamento + chat + tool calling bem-sucedidos, registrar e congelar:
+Recomendação operacional: **2 TiB persistentes**.
 
-- digest/ID da imagem base e ID da imagem derivada;
-- commit exato do checkpoint em `MODEL_REVISION`;
-- driver NVIDIA;
-- vLLM/Transformers/DeepGEMM;
-- contexto, lote e concorrência efetivamente validados.
+## Limite da pesquisa estática
 
-O único teste que documentação, CI e análise estática não substituem é a execução real em 8×H200 com o checkpoint completo carregado.
+A configuração está alinhada às fontes atuais, mas ainda falta evidência de hardware real para: build DeepGEMM no host alvo, carregamento dos ~893 GB, MTP, headroom de KV/workspaces, comportamento prolongado do sparse-decode, tool loops, streaming, throughput, reboot e Spot. A implantação não deve ser chamada de “produção comprovada” antes dessa bateria.
