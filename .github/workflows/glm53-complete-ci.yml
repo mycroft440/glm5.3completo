@@ -21,7 +21,10 @@ jobs:
           sudo apt-get install -y shellcheck
           shellcheck install.sh manage.sh info healthcheck.sh test-api.sh scripts/*.sh
 
-      - name: Global info symlink regression
+      - name: GLM frontend patch self-test
+        run: python3 scripts/patch_vllm_agent_compat.py --self-test
+
+      - name: Global launchers regression
         run: |
           test -x info
           tmpdir="$(mktemp -d)"
@@ -35,14 +38,27 @@ jobs:
           chmod +x "$tmpdir/project/manage.sh"
           ln -s "$tmpdir/project/info" "$tmpdir/bin/glm-info"
           test "$("$tmpdir/bin/glm-info")" = "MANAGE:info"
+          grep -F -- 'INSTALL_DIR="${GLM_INSTALL_DIR:-/opt/glm53-complete}"' install.sh
+          grep -F -- 'cat >/usr/local/bin/glm-manage' install.sh
+          grep -F -- 'exec "$INSTALL_DIR/manage.sh"' install.sh
+          grep -F -- 'name: glm53-complete' docker-compose.yml
 
-      - name: DeepGEMM Dockerfile pins
+      - name: Reproducibility and DeepGEMM pins
         run: |
-          grep -F -- 'vllm/vllm-openai:v0.28.0' Dockerfile
+          grep -F -- 'sha256:2286e8533ca8b6bc777594bae30524f1426ba46ca21797524e06df6a94b06635' .env.example Dockerfile
+          grep -F -- 'sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de' .env.example docker-compose.yml
+          grep -F -- '187fb9fff6319062325ff825627ef6db084d9bc6' .env.example docker-compose.yml
           grep -F -- 'install_deepgemm.sh' Dockerfile
           grep -F -- '2cf0a6915ce544dc493a0990f2ea38d81601128a' Dockerfile
           grep -F -- '8b1392b978f5a03c828dd1711090d7fb50958b8a' Dockerfile
+          grep -F -- 'git submodule update --init --recursive --force' Dockerfile
+          grep -F -- 'patch_vllm_agent_compat.py' Dockerfile
           grep -F -- 'import deep_gemm' Dockerfile
+
+      - name: Dockerfile build check
+        run: |
+          base_image="$(grep '^VLLM_BASE_IMAGE=' .env.example | cut -d= -f2-)"
+          docker buildx build --check --build-arg "VLLM_BASE_IMAGE=${base_image}" .
 
       - name: Compose syntax and GLM wiring
         run: |
@@ -50,22 +66,36 @@ jobs:
           sed -i 's/^API_KEY=.*/API_KEY=ci-test-key/' .env
           docker compose --env-file .env config > /tmp/glm-compose.yml
           grep -F -- 'zai-org/GLM-5.3' /tmp/glm-compose.yml
+          grep -F -- '187fb9fff6319062325ff825627ef6db084d9bc6' /tmp/glm-compose.yml
           grep -F -- '--revision' /tmp/glm-compose.yml
           grep -F -- '--tokenizer-revision' /tmp/glm-compose.yml
           grep -F -- '--kv-cache-dtype' /tmp/glm-compose.yml
           grep -F -- 'num_speculative_tokens' /tmp/glm-compose.yml
           grep -F -- '--max-num-batched-tokens' /tmp/glm-compose.yml
           grep -F -- '8192' /tmp/glm-compose.yml
-          grep -F -- 'VLLM_ENABLE_CUDA_COMPATIBILITY' /tmp/glm-compose.yml
+          grep -F -- 'DG_JIT_CACHE_DIR' /tmp/glm-compose.yml
+          grep -F -- '/root/.cache/deepgemm' /tmp/glm-compose.yml
           grep -F -- '131072' /tmp/glm-compose.yml
           if grep -Fq -- 'privileged: true' docker-compose.yml; then
             echo 'NVIDIA vLLM container must not run privileged' >&2
             exit 1
           fi
 
+      - name: Smoke-test coverage guards
+        run: |
+          grep -F -- 'GLM MAX OK' test-api.sh
+          grep -F -- 'GLM_MAX_REASONING_OK' test-api.sh
+          grep -F -- 'TOOL_LOOP_OK' test-api.sh
+          grep -F -- 'content:null' test-api.sh
+          grep -F -- 'enable_thinking:false' test-api.sh
+          grep -F -- 'stream:true' test-api.sh
+          grep -F -- '[DONE]' test-api.sh
+          grep -F -- '--deep' healthcheck.sh manage.sh
+
       - name: Nginx syntax
         run: |
+          nginx_image="$(grep '^NGINX_IMAGE=' .env.example | cut -d= -f2-)"
           docker run --rm \
             --add-host vllm:127.0.0.1 \
             -v "$PWD/config/nginx.conf:/etc/nginx/conf.d/default.conf:ro" \
-            nginx:1.29-alpine nginx -t
+            "$nginx_image" nginx -t
