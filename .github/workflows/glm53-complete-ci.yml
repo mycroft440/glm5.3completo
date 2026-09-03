@@ -36,6 +36,14 @@ jobs:
           ln -s "$tmpdir/project/info" "$tmpdir/bin/glm-info"
           test "$("$tmpdir/bin/glm-info")" = "MANAGE:info"
 
+      - name: DeepGEMM Dockerfile pins
+        run: |
+          grep -F -- 'vllm/vllm-openai:v0.28.0' Dockerfile
+          grep -F -- 'install_deepgemm.sh' Dockerfile
+          grep -F -- '2cf0a6915ce544dc493a0990f2ea38d81601128a' Dockerfile
+          grep -F -- '8b1392b978f5a03c828dd1711090d7fb50958b8a' Dockerfile
+          grep -F -- 'import deep_gemm' Dockerfile
+
       - name: Compose syntax and GLM wiring
         run: |
           cp .env.example .env
@@ -46,7 +54,14 @@ jobs:
           grep -F -- '--tokenizer-revision' /tmp/glm-compose.yml
           grep -F -- '--kv-cache-dtype' /tmp/glm-compose.yml
           grep -F -- 'num_speculative_tokens' /tmp/glm-compose.yml
+          grep -F -- '--max-num-batched-tokens' /tmp/glm-compose.yml
+          grep -F -- '8192' /tmp/glm-compose.yml
+          grep -F -- 'VLLM_ENABLE_CUDA_COMPATIBILITY' /tmp/glm-compose.yml
           grep -F -- '131072' /tmp/glm-compose.yml
+          if grep -Fq -- 'privileged: true' docker-compose.yml; then
+            echo 'NVIDIA vLLM container must not run privileged' >&2
+            exit 1
+          fi
 
       - name: Nginx syntax
         run: |
