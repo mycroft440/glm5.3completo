@@ -1,38 +1,67 @@
 # Compatibilidade com agentes
 
-O servidor expõe o GLM-5.3 completo no formato OpenAI.
+O servidor expõe o GLM-5.3 completo em formato OpenAI e incorpora proteções específicas para históricos de agentes.
 
 ## Raciocínio
 
-O GLM-5.3 mantém thinking ativo e oferece níveis via `reasoning_effort`: `low`, `high` e `max`. Para históricos reenviados, use `chat_template_kwargs.clear_thinking=true`.
+Use:
 
-Evite flags antigas `enable_thinking=false` / `thinking=false` até validar a versão instalada, pois houve incompatibilidades upstream entre template e reasoning parser na família GLM-5.3.
+```json
+{
+  "chat_template_kwargs": {
+    "reasoning_effort": "low",
+    "clear_thinking": true
+  }
+}
+```
+
+Valores recomendados do GLM-5.3: `low`, `high` e `max`.
+
+Este runtime rejeita `chat_template_kwargs.enable_thinking` e `chat_template_kwargs.thinking`. Essas flags pertencem a fluxos/template antigos e, na família GLM-5.3, podem fazer o parser deixar de separar reasoning embora o modelo continue raciocinando. Isso pode contaminar `message.content` com scratchpad.
 
 ## `content=null` + tool calls
 
-Clientes OpenAI podem armazenar uma mensagem de ferramenta com `assistant.content=null`. Para evitar templates que renderizem `None` literalmente em versões não corrigidas, normalize esse caso para string vazia no cliente:
+Clientes OpenAI costumam reenviar o turno do assistente assim:
 
-```python
-def normalize_glm_messages(messages):
-    out = []
-    for msg in messages:
-        msg = dict(msg)
-        if msg.get("role") == "assistant" and msg.get("tool_calls") and msg.get("content") is None:
-            msg["content"] = ""
-        out.append(msg)
-    return out
+```json
+{
+  "role": "assistant",
+  "content": null,
+  "tool_calls": [...]
+}
 ```
+
+Enquanto a correção upstream não estiver incorporada ao runtime usado, o servidor derivado normaliza esse `content` para `""` antes do chat template. Portanto os clientes não precisam implementar obrigatoriamente o workaround por conta própria; normalizar também no cliente continua inofensivo.
 
 ## Tool calling
 
 O servidor usa:
 
-- `--tool-call-parser glm47`
-- `--enable-auto-tool-choice`
-- `--reasoning-parser glm45`
+```text
+--tool-call-parser glm47
+--enable-auto-tool-choice
+--reasoning-parser glm45
+```
 
-`./manage.sh test` força uma função nomeada e valida `tool_calls` + `arguments` JSON. Execute esse teste sempre após atualizar o runtime.
+`glm-manage test` valida duas etapas, não apenas a criação do tool call:
+
+1. o modelo emite `tool_calls` + arguments JSON válidos;
+2. o histórico é reenviado com `assistant.content=null`, recebe uma mensagem `role=tool` e precisa produzir uma resposta final correta.
+
+Isso cobre o fluxo real de agentes que faltava no smoke test antigo.
+
+## Streaming
+
+O smoke test também usa `stream:true`, exige eventos SSE `data:`, marcador `[DONE]`, conteúdo esperado e ausência de tags `<think>` em `delta.content`.
 
 ## MTP
 
-O perfil padrão usa 5 draft tokens conforme o recipe atual do GLM-5.3. Se houver instabilidade específica de speculative decoding na VM real, a primeira comparação diagnóstica deve ser desligar MTP temporariamente e repetir chat/tool calling, sem alterar outros parâmetros ao mesmo tempo.
+O perfil padrão mantém 5 draft tokens conforme o recipe atual. Se a VM real apresentar instabilidade específica de speculative decoding, o diagnóstico deve comparar MTP ligado/desligado alterando somente esse parâmetro e repetindo a mesma bateria de chat/tools/streaming.
+
+## Atualizações
+
+Depois de qualquer `glm-manage update`, a atualização só é aceita se o smoke test completo passar. Isso reduz o risco de uma mudança de runtime quebrar agentes silenciosamente.
+
+Referências upstream:
+- https://github.com/vllm-project/vllm/pull/54368
+- https://github.com/vllm-project/vllm/pull/54825
