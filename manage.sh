@@ -17,9 +17,29 @@ validate_deployment_config() {
   docker compose --env-file .env config >/dev/null
 }
 
+require_runtime_image() {
+  docker image inspect "${VLLM_IMAGE:-glm53-complete-vllm:0.28.0-deepgemm}" >/dev/null 2>&1 \
+    || die "Imagem de runtime ausente. Execute sudo ./install.sh ou ./manage.sh update."
+}
+
+build_runtime_image() {
+  local target="$1" pull_base="${2:-0}"
+  local -a build_args=()
+  if [[ "$pull_base" == "1" ]]; then build_args+=(--pull); fi
+  docker build "${build_args[@]}" \
+    --build-arg "VLLM_BASE_IMAGE=${VLLM_BASE_IMAGE:-vllm/vllm-openai:v0.28.0}" \
+    --build-arg "VLLM_SOURCE_REF=${VLLM_SOURCE_REF:-2cf0a6915ce544dc493a0990f2ea38d81601128a}" \
+    --build-arg "DEEPGEMM_REF=${DEEPGEMM_REF:-8b1392b978f5a03c828dd1711090d7fb50958b8a}" \
+    -t "$target" \
+    "$ROOT_DIR"
+}
+
 validate_runtime_image() {
-  docker run --rm --gpus all --entrypoint python3 "${VLLM_IMAGE:-vllm/vllm-openai:v0.28.0}" \
-    -c "import sys, torch, vllm; from importlib.metadata import version; from packaging.version import Version; n=torch.cuda.device_count(); vv=Version(vllm.__version__.split('+')[0]); tv=Version(version('transformers')); print(f'vLLM {vv}; Transformers {tv}; CUDA GPUs={n}; {torch.cuda.get_device_name(0) if n else \"none\"}'); sys.exit(0 if n >= ${TENSOR_PARALLEL_SIZE:-8} and vv >= Version('0.28.0') and tv >= Version('5.15.0') else 1)"
+  local image="${1:-${VLLM_IMAGE:-glm53-complete-vllm:0.28.0-deepgemm}}"
+  docker run --rm --gpus all \
+    -e "VLLM_ENABLE_CUDA_COMPATIBILITY=${VLLM_ENABLE_CUDA_COMPATIBILITY:-1}" \
+    --entrypoint python3 "$image" \
+    -c "import sys, vllm; import torch, deep_gemm; from importlib.metadata import version; from packaging.version import Version; n=torch.cuda.device_count(); vv=Version(vllm.__version__.split('+')[0]); tv=Version(version('transformers')); print(f'vLLM {vv}; Transformers {tv}; DeepGEMM OK; CUDA GPUs={n}; {torch.cuda.get_device_name(0) if n else \"none\"}'); sys.exit(0 if n >= ${TENSOR_PARALLEL_SIZE:-8} and vv >= Version('0.28.0') and tv >= Version('5.15.0') else 1)"
 }
 
 wait_for_api() {
@@ -38,21 +58,39 @@ diagnose() {
     grep -E '^(PRETTY_NAME|VERSION_ID)=' /etc/os-release || true
   fi
   uname -srmo || true
+
   printf '\n%s\n' "=== NVIDIA ==="
   nvidia-smi --query-gpu=index,name,driver_version,memory.total,memory.used,utilization.gpu --format=csv || true
+  printf '\n%s\n' "--- Topologia ---"
+  nvidia-smi topo -m || true
+  if systemctl list-unit-files --no-legend 'nvidia-fabricmanager*.service' 2>/dev/null | grep -q .; then
+    printf '\nFabric Manager: '
+    systemctl is-active nvidia-fabricmanager.service 2>/dev/null || true
+  fi
+
   printf '\n%s\n' "=== Docker ==="
   docker --version || true
   docker compose version || true
   docker info --format 'DockerRootDir={{.DockerRootDir}}' 2>/dev/null || true
-  printf '\n%s\n' "=== Imagem vLLM ==="
-  docker image inspect "${VLLM_IMAGE:-vllm/vllm-openai:v0.28.0}" --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null || true
+
+  printf '\n%s\n' "=== Imagens ==="
+  printf 'Base: %s\nRuntime: %s\n' "${VLLM_BASE_IMAGE:-vllm/vllm-openai:v0.28.0}" "${VLLM_IMAGE:-glm53-complete-vllm:0.28.0-deepgemm}"
+  docker image inspect "${VLLM_IMAGE:-glm53-complete-vllm:0.28.0-deepgemm}" \
+    --format 'Id={{.Id}} {{range .RepoDigests}}Digest={{.}} {{end}}' 2>/dev/null || true
+
   printf '\n%s\n' "=== Modelo configurado ==="
-  printf 'MODEL_ID=%s\nMODEL_REVISION=%s\nMAX_MODEL_LEN=%s\nKV_CACHE_DTYPE=%s\n' "${MODEL_ID:-zai-org/GLM-5.3}" "${MODEL_REVISION:-main}" "${MAX_MODEL_LEN:-131072}" "${KV_CACHE_DTYPE:-fp8}"
+  printf 'MODEL_ID=%s\nMODEL_REVISION=%s\nMAX_MODEL_LEN=%s\nMAX_NUM_BATCHED_TOKENS=%s\nKV_CACHE_DTYPE=%s\nCUDA_COMPAT=%s\nDEEPGEMM_REF=%s\n' \
+    "${MODEL_ID:-zai-org/GLM-5.3}" "${MODEL_REVISION:-main}" "${MAX_MODEL_LEN:-131072}" \
+    "${MAX_NUM_BATCHED_TOKENS:-8192}" "${KV_CACHE_DTYPE:-fp8}" "${VLLM_ENABLE_CUDA_COMPATIBILITY:-1}" \
+    "${DEEPGEMM_REF:-8b1392b978f5a03c828dd1711090d7fb50958b8a}"
+
   printf '\n%s\n' "=== Containers ==="
   docker compose --env-file .env ps || true
   if docker compose --env-file .env ps --services --status running | grep -qx vllm; then
     printf '\n%s\n' "=== Runtime ==="
-    docker exec glm53-full-vllm python3 -c "import vllm; from importlib.metadata import version; print('vLLM', vllm.__version__); print('Transformers', version('transformers')); import importlib.util; print('DeepGEMM module', bool(importlib.util.find_spec('deep_gemm')))" 2>/dev/null || true
+    docker exec glm53-full-vllm python3 -c \
+      "import vllm, deep_gemm; from importlib.metadata import version; print('vLLM', vllm.__version__); print('Transformers', version('transformers')); print('DeepGEMM', deep_gemm.__file__)" \
+      2>/dev/null || true
   fi
 }
 
@@ -64,9 +102,7 @@ show_info() {
   gpu_count="$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l | tr -d ' ' || true)"
   gpu_names="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sort -u | paste -sd ',' - | sed 's/,/, /g' || true)"
   host_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)"
-  if [[ -z "$host_ip" ]]; then
-    host_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
-  fi
+  if [[ -z "$host_ip" ]]; then host_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"; fi
   case "${BIND_ADDRESS:-127.0.0.1}" in
     127.0.0.1|localhost) remote_url="DESATIVADO (API somente local)" ;;
     0.0.0.0)
@@ -92,7 +128,11 @@ Tensor Parallel:    ${TENSOR_PARALLEL_SIZE:-8}
 KV cache:           ${KV_CACHE_DTYPE:-fp8}
 MTP draft tokens:   ${MTP_SPECULATIVE_TOKENS:-5}
 Max sequências:     ${MAX_NUM_SEQS:-8}
-Imagem vLLM:        ${VLLM_IMAGE:-vllm/vllm-openai:v0.28.0}
+Lote máx. tokens:   ${MAX_NUM_BATCHED_TOKENS:-8192}
+Imagem base vLLM:   ${VLLM_BASE_IMAGE:-vllm/vllm-openai:v0.28.0}
+Imagem runtime:     ${VLLM_IMAGE:-glm53-complete-vllm:0.28.0-deepgemm}
+DeepGEMM ref:       ${DEEPGEMM_REF:-8b1392b978f5a03c828dd1711090d7fb50958b8a}
+CUDA compat:        ${VLLM_ENABLE_CUDA_COMPATIBILITY:-1}
 GPUs detectadas:    ${gpu_count:-0}
 Modelo(s) de GPU:   ${gpu_names:-indisponível}
 Cache HuggingFace:  ${HF_CACHE_DIR:-/var/lib/glm53-full/huggingface}
@@ -119,8 +159,8 @@ glm-info                 Mostrar este painel de qualquer pasta
 ./manage.sh wait         Aguardar a API ficar pronta
 ./manage.sh test         Smoke test: API + chat + tool calling
 ./manage.sh diagnose     Diagnóstico técnico
-./manage.sh restart      Reaplicar .env sem puxar imagens novas
-./manage.sh update       Atualizar vLLM com validação e rollback
+./manage.sh restart      Reaplicar .env sem puxar/reconstruir imagens
+./manage.sh update       Reconstruir runtime com validação e rollback
 ./manage.sh key          Mostrar somente a API key
 ============================================================
 INFO
@@ -130,42 +170,53 @@ INFO
 }
 
 rollback_vllm_image() {
-  local old_vllm_id="$1"
+  local old_vllm_id="$1" timeout_sec="${2:-${VLLM_ENGINE_READY_TIMEOUT_S:-7200}}"
   [[ -n "$old_vllm_id" ]] || return 1
-  docker tag "$old_vllm_id" "${VLLM_IMAGE:-vllm/vllm-openai:v0.28.0}" || return 1
+  docker tag "$old_vllm_id" "${VLLM_IMAGE:-glm53-complete-vllm:0.28.0-deepgemm}" || return 1
   docker compose --env-file .env up -d --force-recreate --pull never || return 1
+  if ! wait_for_api "$timeout_sec"; then
+    warn "A imagem anterior foi restaurada, mas a API não voltou ao estado saudável dentro do limite."
+    return 1
+  fi
+  "$ROOT_DIR/healthcheck.sh" >/dev/null 2>&1 || return 1
+  return 0
 }
 
 safe_update() {
-  local image="${VLLM_IMAGE:-vllm/vllm-openai:v0.28.0}" old_vllm_id="" new_vllm_id="" timeout_sec
-  [[ "$image" != *@sha256:* ]] || die "VLLM_IMAGE está fixada por digest; escolha explicitamente uma nova imagem no .env para atualizar."
+  local image="${VLLM_IMAGE:-glm53-complete-vllm:0.28.0-deepgemm}" old_vllm_id="" candidate timeout_sec
+  [[ "$image" != *@sha256:* ]] || die "VLLM_IMAGE está fixada por digest; escolha explicitamente um novo nome/tag local para reconstruir."
+
   validate_deployment_config
   old_vllm_id="$(docker image inspect "$image" --format '{{.Id}}' 2>/dev/null || true)"
-  docker compose --env-file .env pull vllm
-  new_vllm_id="$(docker image inspect "$image" --format '{{.Id}}' 2>/dev/null || true)"
-  [[ -n "$new_vllm_id" ]] || die "Imagem vLLM indisponível após pull."
-  if ! validate_runtime_image; then
-    if [[ -n "$old_vllm_id" && "$old_vllm_id" != "$new_vllm_id" ]]; then
-      docker tag "$old_vllm_id" "$image" || true
-    fi
-    die "A imagem nova falhou na validação de runtime."
+  candidate="${image}-candidate-$(date +%s)"
+
+  log "Construindo runtime candidato a partir de ${VLLM_BASE_IMAGE:-vllm/vllm-openai:v0.28.0}..."
+  if ! build_runtime_image "$candidate" 1; then
+    die "Falha ao construir a imagem candidata. O servidor em execução não foi alterado."
   fi
-  if [[ -n "$old_vllm_id" && "$old_vllm_id" == "$new_vllm_id" ]]; then
-    log "A imagem já está atualizada."
-    return 0
+
+  log "Validando CUDA/vLLM/Transformers/DeepGEMM antes de trocar o servidor..."
+  if ! validate_runtime_image "$candidate"; then
+    docker image rm "$candidate" >/dev/null 2>&1 || true
+    die "A imagem candidata falhou na validação. O servidor em execução não foi alterado."
   fi
+
+  docker tag "$candidate" "$image"
   docker compose --env-file .env up -d --force-recreate --pull never
   timeout_sec="${VLLM_ENGINE_READY_TIMEOUT_S:-7200}"
-  if wait_for_api "$timeout_sec"; then
-    if "$ROOT_DIR/test-api.sh"; then
-      log "Atualização concluída e validada."
-      return 0
-    fi
+  if wait_for_api "$timeout_sec" && "$ROOT_DIR/test-api.sh"; then
+    docker image rm "$candidate" >/dev/null 2>&1 || true
+    log "Atualização concluída e validada."
+    return 0
   fi
-  if [[ -n "$old_vllm_id" && "$old_vllm_id" != "$new_vllm_id" ]]; then
+
+  if [[ -n "$old_vllm_id" ]]; then
     warn "Atualização rejeitada; restaurando imagem anterior."
-    rollback_vllm_image "$old_vllm_id" || true
+    rollback_vllm_image "$old_vllm_id" "$timeout_sec" || warn "Rollback executado, mas a recuperação automática não pôde ser confirmada."
+  else
+    warn "Não havia imagem anterior registrada para rollback automático."
   fi
+  docker image rm "$candidate" >/dev/null 2>&1 || true
   die "Atualização falhou. Execute ./manage.sh logs e ./manage.sh diagnose."
 }
 
@@ -173,6 +224,7 @@ case "${1:-status}" in
   start)
     require_docker_access "$@"
     validate_deployment_config
+    require_runtime_image
     docker compose --env-file .env up -d --pull never
     ;;
   stop)
@@ -182,6 +234,7 @@ case "${1:-status}" in
   restart|apply)
     require_docker_access "$@"
     validate_deployment_config
+    require_runtime_image
     docker compose --env-file .env up -d --force-recreate --pull never
     ;;
   status)
@@ -200,11 +253,7 @@ case "${1:-status}" in
   wait)
     timeout_sec="${VLLM_ENGINE_READY_TIMEOUT_S:-7200}"
     log "Aguardando API (limite ${timeout_sec}s)..."
-    if wait_for_api "$timeout_sec"; then
-      "$ROOT_DIR/healthcheck.sh"
-    else
-      die "API não ficou pronta; execute ./manage.sh logs."
-    fi
+    if wait_for_api "$timeout_sec"; then "$ROOT_DIR/healthcheck.sh"; else die "API não ficou pronta; execute ./manage.sh logs."; fi
     ;;
   test) "$ROOT_DIR/test-api.sh" ;;
   diagnose) require_docker_access "$@"; diagnose ;;
