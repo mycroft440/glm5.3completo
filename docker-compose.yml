@@ -1,0 +1,80 @@
+services:
+  vllm:
+    image: "${VLLM_IMAGE:-vllm/vllm-openai:v0.28.0}"
+    container_name: glm53-full-vllm
+    restart: unless-stopped
+    privileged: true
+    ipc: host
+    environment:
+      HF_HOME: /root/.cache/huggingface
+      HF_TOKEN: "${HF_TOKEN:-}"
+      VLLM_API_KEY: "${API_KEY}"
+      VLLM_ENGINE_READY_TIMEOUT_S: "${VLLM_ENGINE_READY_TIMEOUT_S:-7200}"
+      VLLM_MEDIA_URL_ALLOW_REDIRECTS: "${VLLM_MEDIA_URL_ALLOW_REDIRECTS:-0}"
+      VLLM_CACHE_ROOT: /root/.cache/vllm
+    volumes:
+      - "${HF_CACHE_DIR:-/var/lib/glm53-full/huggingface}:/root/.cache/huggingface"
+      - "${VLLM_CACHE_DIR:-/var/lib/glm53-full/vllm-cache}:/root/.cache/vllm"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command:
+      - "${MODEL_ID:-zai-org/GLM-5.3}"
+      - --revision
+      - "${MODEL_REVISION:-main}"
+      - --tokenizer-revision
+      - "${MODEL_REVISION:-main}"
+      - --tensor-parallel-size
+      - "${TENSOR_PARALLEL_SIZE:-8}"
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-131072}"
+      - --max-num-seqs
+      - "${MAX_NUM_SEQS:-8}"
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.90}"
+      - --kv-cache-dtype
+      - "${KV_CACHE_DTYPE:-fp8}"
+      - --speculative-config
+      - "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_SPECULATIVE_TOKENS:-5}}"
+      - --tool-call-parser
+      - glm47
+      - --enable-auto-tool-choice
+      - --reasoning-parser
+      - glm45
+      - --served-model-name
+      - "${SERVED_MODEL_NAME:-glm-5.3}"
+      - --allowed-media-domains
+      - "${ALLOWED_MEDIA_DOMAIN:-media.invalid}"
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+    networks:
+      - glm-internal
+
+  gateway:
+    image: nginx:1.29-alpine
+    container_name: glm53-full-gateway
+    restart: unless-stopped
+    depends_on:
+      - vllm
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8000}:8000"
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - glm-internal
+
+networks:
+  glm-internal:
+    driver: bridge

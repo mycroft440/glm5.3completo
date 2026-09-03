@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
+ROOT_DIR="$(cd -- "$(dirname -- "$SELF")" && pwd)"
+exec "$ROOT_DIR/manage.sh" info
