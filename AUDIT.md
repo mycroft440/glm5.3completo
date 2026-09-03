@@ -1,104 +1,68 @@
 # Auditoria técnica — GLM-5.3 completo
 
-Última revisão: 2026-09-03.
+Última rodada: 2026-09-03. Esta revisão foi feita deliberadamente como auditoria de código de terceiros, procurando motivos para rejeitar a implantação.
 
-## Escopo
+## Base confirmada
 
-Bootstrap Azure, Ubuntu HPC, Docker/Compose, NVIDIA Container Toolkit, driver/CUDA, Fabric Manager, vLLM 0.28.0, DeepGEMM, GLM-5.3 FP8, MTP, KV cache, batching, Nginx, API OpenAI, tool calling, segurança, persistência, atualização/rollback, `glm-info`, CI e documentação técnica.
+- GLM-5.3: ~743B parâmetros totais / 39B ativos, checkpoint FP8 ~893 GB.
+- Perfil single-node: 8× H200/H20, TP=8.
+- KV FP8, MTP=5, `glm47` para tools, `glm45` para reasoning.
+- DeepGEMM requerido para o caminho FP8 de desempenho.
+- Contexto inicial deste projeto: 131.072 tokens; lote inicial 8.192.
 
-## Base técnica confirmada
+## Problemas encontrados e corrigidos nesta rodada
 
-- `zai-org/GLM-5.3`: ~743B parâmetros totais / 39B ativos.
-- checkpoint padrão FP8, ~893 GB na classificação do recipe.
-- vLLM >=0.28.0 e Transformers >=5.15.0.
-- perfil NVIDIA single-node: 8×H200/H20, TP=8.
-- KV cache FP8 e MTP de 5 draft tokens.
-- `glm47` para tools e `glm45` para reasoning.
-- contexto nativo até 1.048.576, mas 1M é associado pelo recipe ao perfil 8×B200; H200 começa conservador neste projeto.
+1. **Rollback não era realmente transacional.** Sob `set -e`, falha no `docker compose up` encerrava `safe_update` antes do rollback. O `up` agora está dentro do fluxo controlado e falha entra explicitamente no rollback.
+2. **Checkpoint mutável (`MODEL_REVISION=main`).** Fixado em `187fb9fff6319062325ff825627ef6db084d9bc6`; preflight rejeita revisão não-SHA.
+3. **Tags mutáveis de vLLM/Nginx.** Bases fixadas por digest SHA256.
+4. **Workaround `content=null` dependia do cliente.** Runtime derivado agora normaliza no servidor `assistant.content=None + tool_calls` para `""`.
+5. **Flags antigas de thinking podiam contaminar `content`.** Runtime GLM-only rejeita `enable_thinking`/`thinking`; smoke test também detecta `<think>` vazando.
+6. **Tool smoke test parava na primeira chamada.** Agora executa ciclo completo `tool_calls -> role=tool -> resposta final` e envia deliberadamente `assistant.content=null` no segundo turno.
+7. **Chat smoke test aceitava qualquer string.** Agora exige tokens sentinela exatos e testa `reasoning_effort=low` e `max`.
+8. **Streaming não era testado.** Agora exige SSE `data:`, `[DONE]`, token esperado e ausência de tags de reasoning em `delta.content`.
+9. **Healthcheck só provava `/v1/models`.** `--deep` faz inferência real; `glm-manage wait` e rollback usam essa verificação profunda.
+10. **Cache JIT DeepGEMM era efêmero.** Persistido em volume próprio.
+11. **Instalador DeepGEMM podia misturar submódulos.** Depois do checkout fixado executa `git submodule sync/update --recursive --force`.
+12. **Clone Git era dependência de produção.** Instalador cria snapshot operacional em `/opt/glm53-complete`, recria o gateway a partir dali e cria launchers globais independentes do clone.
+13. **Operações concorrentes não tinham lock.** Instalação e comandos mutáveis usam `flock` em `/var/lock/glm53-complete.lock`.
+14. **Preflight aceitava hardware apenas por VRAM.** Agora exige exatamente 8 H200 homogêneas por default, RAM mínima, NVLink/NVSwitch e Fabric Manager ativo.
+15. **Estudo da imagem Azure estava desatualizado.** Perfil recomendado atualizado para `microsoft-dsvm:ubuntu-hpc:2404:24.04.2026072901` (R580/CUDA13).
+16. **Imagens antigas podiam se acumular em updates.** Após update validado, o fluxo tenta liberar a imagem anterior sem remover imagens ainda referenciadas.
+17. **CI era majoritariamente estática.** Passou a incluir self-test do patch GLM, verificação de pins, `docker buildx build --check`, snapshot/launchers, Compose, cobertura dos novos smoke tests e Nginx por digest.
+18. **Reserva de disco não incluía DeepGEMM JIT.** Mínimo agregado padrão no mesmo filesystem passou de 1.330 para 1.350 GiB.
 
-## Problemas encontrados e corrigidos
+## Decisão consciente: OOM FlashMLA
 
-1. A documentação anterior tratava DeepGEMM como suficientemente integrado ao stack; o recipe oficial atual diz explicitamente que **DeepGEMM é requerido para FP8** e deve ser instalado com `install_deepgemm.sh`.
-2. Foi criado um `Dockerfile` derivado da imagem vLLM 0.28.0, com source ref do vLLM e commit do DeepGEMM fixados.
-3. O build falha se `import deep_gemm` não funcionar; instalação e update também validam DeepGEMM com GPU antes de trocar/subir o servidor.
-4. O container NVIDIA usava `privileged: true`, permissão desnecessária para o caminho oficial NVIDIA. Foi removida; permanecem GPU reservation e `ipc: host`.
-5. A imagem vLLM 0.28.0 usa CUDA 13, enquanto a documentação da Azure HPC ainda lista driver R535/CUDA 12.4. O instalador agora escolhe CUDA forward compatibility automaticamente: driver <R580 liga; R580+ desliga.
-6. O import de validação preserva a ordem necessária para o vLLM configurar compat libraries antes da inicialização CUDA do PyTorch.
-7. Foi adicionado `MAX_NUM_BATCHED_TOKENS=8192` para limitar explicitamente workspace/batch e mitigar risco de OOM tardio do sparse-decode observado em GLM FP8/8×H200.
-8. O preflight avisa caso o operador aumente o lote acima de 8192.
-9. O preflight agora valida `VLLM_BASE_IMAGE`, `VLLM_IMAGE`, source ref, DeepGEMM ref, CUDA compatibility e impede que a imagem runtime use a mesma tag da imagem base.
-10. Instalações com `.env` antigo são migradas automaticamente para as novas chaves sem apagar preferências existentes; o antigo runtime oficial direto é migrado para a tag local com DeepGEMM.
-11. `update` não tenta mais fazer pull de uma imagem runtime local inexistente no registry. Ele constrói uma imagem candidata, valida e só depois troca o servidor.
-12. O update preserva a imagem em execução enquanto constrói/testa o candidato.
-13. Se health/chat/tools falharem depois da troca, o update restaura a imagem anterior e tenta confirmar que a API voltou saudável.
-14. Os checks negativos do smoke test (`/v1/models` sem chave e `/invocations`) ganharam timeout explícito para não travarem indefinidamente.
-15. `diagnose` ganhou topologia `nvidia-smi topo -m`, estado do Fabric Manager quando disponível e informações de base/runtime/DeepGEMM/CUDA sem revelar API key.
-16. O preflight avisa quando Fabric Manager está instalado mas inativo em um nó multi-GPU.
-17. `glm-info` mostra lote máximo, base/runtime, DeepGEMM ref e estado de CUDA compatibility além das informações já existentes.
-18. A CI passou a verificar pins do Dockerfile, wiring de lote/CUDA, configuração GLM/MTP/KV e ausência de `privileged: true`.
+A correção upstream vLLM #53755 troca a revisão do FlashMLA usada **durante a compilação**. A imagem vLLM 0.28.0 já contém os binários/extensões compilados. Portanto não foi aplicado um “backport” superficial por arquivo, pois isso criaria falsa segurança.
 
-## Hardening que já existia e foi preservado
+Até usar uma imagem/release estável que contenha a correção compilada, o projeto conserva `MAX_NUM_BATCHED_TOKENS=8192` e exige teste prolongado em H200. Esse risco é conhecido, documentado e não escondido.
 
-- Nginx publica somente `/v1/`; `/invocations` é bloqueado.
-- bind `127.0.0.1` por padrão.
-- API key aleatória em `.env` modo 600.
-- URLs remotas bloqueadas por allowlist inválida + redirects desligados.
-- caches HF/vLLM persistentes.
-- logs Docker com rotação.
-- `MODEL_REVISION` configurável para pin do checkpoint.
-- `start/restart/apply` não fazem pull silencioso.
-- smoke test cobre autenticação, gateway, `/v1/models`, chat e tool calling nomeado.
-- `glm-info` funciona por symlink global.
+## Pontos que a CI consegue provar
 
-## Issues upstream triadas
+- sintaxe Bash e ShellCheck;
+- self-test determinístico do patch de compatibilidade GLM;
+- wiring/pins do Dockerfile, modelo e Compose;
+- `buildx --check` do Dockerfile;
+- ausência de `privileged: true`;
+- persistência de cache DeepGEMM;
+- estrutura de snapshot/launchers;
+- presença dos casos críticos no smoke test;
+- sintaxe Nginx usando imagem fixada.
 
-- OOM de sparse decode em GLM FP8/H200: issue `vllm#53413`; correção `#53755` foi mesclada depois do commit do tag v0.28.0. O limite explícito de 8192 tokens/lote é uma mitigação conservadora adicional.
-- Issues recentes de DCP: não afetam o perfil padrão porque DCP não está ativado.
-- Issues de KV offloading: não afetam o perfil padrão porque KV offload não está ativado.
-- Problemas de clientes com reasoning/tool history continuam documentados em `AGENT_COMPAT.md`.
+## Pontos que continuam dependendo de 8×H200 real
 
-## Pontos deliberadamente conservadores
+- build completo do DeepGEMM/CUDA no host alvo;
+- download/carregamento integral do checkpoint;
+- estabilidade de KV/workspaces e MTP;
+- stress prolongado do sparse-decode em vLLM 0.28.0;
+- throughput/latência/concorrência;
+- execução real de low/max reasoning, multi-turn tools e streaming;
+- reboot/Spot e reaproveitamento dos três caches.
 
-```text
-MAX_MODEL_LEN=131072
-MAX_NUM_SEQS=8
-MAX_NUM_BATCHED_TOKENS=8192
-GPU_MEMORY_UTILIZATION=0.90
-KV_CACHE_DTYPE=fp8
-MTP_SPECULATIVE_TOKENS=5
-```
+## Configuração administrativa ainda externa ao código
 
-Não foram habilitados DCP, KV offload ou outras otimizações experimentais antes do baseline real em H200.
+A branch `main` deve ter proteção/status check obrigatório no GitHub. Isso não pode ser garantido por um arquivo dentro do repositório e deve ser verificado nas configurações do próprio GitHub. Não classificar o repositório como protegido sem confirmar esse estado.
 
-## Riscos que permanecem dependentes de hardware
+## Critério de aprovação
 
-Não há análise estática que possa provar:
-
-- que o build DeepGEMM derivado terminará corretamente com a imagem Docker efetivamente baixada na VM;
-- que os ~893 GB do checkpoint carregarão sem mudança upstream incompatível;
-- o headroom real de VRAM/KV/workspaces em 8×H200;
-- estabilidade de MTP sob carga prolongada;
-- throughput/concorrência reais;
-- comportamento após reboot ou substituição de VM Spot;
-- integridade/velocidade do caminho NVLink/NVSwitch/Fabric Manager da VM concreta.
-
-Por isso o estado correto é **implantação fortemente revisada e CI-validada, mas ainda não comprovada em produção até o primeiro teste 8×H200**.
-
-## Estratégia pós-primeiro boot
-
-1. executar `./manage.sh diagnose`;
-2. executar `./manage.sh test`;
-3. aumentar carga gradualmente mantendo telemetria de VRAM;
-4. testar reboot e reaproveitamento dos caches;
-5. fixar `MODEL_REVISION` no commit exato do checkpoint que funcionou;
-6. registrar ID/digest da base, ID da imagem derivada, driver, vLLM, Transformers e DeepGEMM;
-7. só depois experimentar contexto/concorrência maiores ou otimizações adicionais.
-
-## Fontes principais
-
-- https://recipes.vllm.ai/zai-org/GLM-5.3
-- https://docs.vllm.ai/en/v0.28.0/deployment/docker/
-- https://github.com/vllm-project/vllm/tree/v0.28.0
-- https://github.com/vllm-project/vllm/issues/53413
-- https://github.com/vllm-project/vllm/pull/53755
-- https://learn.microsoft.com/azure/virtual-machines/azure-hpc-vm-images
+O repositório está apto para **primeira validação séria em 8×H200** quando a CI final estiver verde. “Produção comprovada” continua condicionado ao teste real de hardware e stress, especialmente pelo risco upstream FlashMLA ainda não compilado no vLLM 0.28.0.
