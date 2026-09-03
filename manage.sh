@@ -97,12 +97,18 @@ GPUs detectadas:    ${gpu_count:-0}
 Modelo(s) de GPU:   ${gpu_names:-indisponível}
 Cache HuggingFace:  ${HF_CACHE_DIR:-/var/lib/glm53-full/huggingface}
 Cache vLLM:         ${VLLM_CACHE_DIR:-/var/lib/glm53-full/vllm-cache}
+Mídia remota:       ${ALLOWED_MEDIA_DOMAIN:-bloqueada}
 
 PARA USAR A API
 ---------------
 Base URL: ${origin}/v1
 Model:    ${SERVED_MODEL_NAME:-glm-5.3}
 Header:   Authorization: Bearer <API_KEY_ACIMA>
+
+Teste:
+  export GLM_BASE_URL='${origin}/v1'
+  export GLM_API_KEY='<API_KEY_ACIMA>'
+  curl "$GLM_BASE_URL/models" -H "Authorization: Bearer $GLM_API_KEY"
 
 COMANDOS
 --------
