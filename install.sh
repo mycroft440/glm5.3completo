@@ -72,12 +72,49 @@ nvidia-ctk runtime configure --runtime=docker
 systemctl restart docker
 
 if [[ ! -f .env ]]; then cp .env.example .env; log "Arquivo .env criado."; fi
+
+ensure_env_key() {
+  local key="$1" value="$2"
+  if ! grep -qE "^${key}=" .env; then
+    printf '%s=%s\n' "$key" "$value" >> .env
+    log "Configuração ${key} adicionada ao .env existente."
+  fi
+}
+
+# Migra instalações criadas por revisões anteriores sem apagar preferências do usuário.
+ensure_env_key VLLM_BASE_IMAGE "vllm/vllm-openai:v0.28.0"
+ensure_env_key VLLM_SOURCE_REF "2cf0a6915ce544dc493a0990f2ea38d81601128a"
+ensure_env_key DEEPGEMM_REF "8b1392b978f5a03c828dd1711090d7fb50958b8a"
+ensure_env_key VLLM_ENABLE_CUDA_COMPATIBILITY "auto"
+ensure_env_key MAX_NUM_BATCHED_TOKENS "8192"
+
+CURRENT_RUNTIME_IMAGE="$(grep -E '^VLLM_IMAGE=' .env | head -n1 | cut -d= -f2- || true)"
+if [[ "$CURRENT_RUNTIME_IMAGE" == "vllm/vllm-openai:v0.28.0" ]]; then
+  sed -i 's#^VLLM_IMAGE=vllm/vllm-openai:v0.28.0$#VLLM_IMAGE=glm53-complete-vllm:0.28.0-deepgemm#' .env
+  log "VLLM_IMAGE migrada para o runtime derivado com DeepGEMM."
+fi
+
 CURRENT_KEY="$(grep -E '^API_KEY=' .env | head -n1 | cut -d= -f2- || true)"
 if [[ -z "$CURRENT_KEY" || "$CURRENT_KEY" == "CHANGE_ME" ]]; then
   GENERATED_KEY="$(openssl rand -hex 32)"
   if grep -q '^API_KEY=' .env; then sed -i "s/^API_KEY=.*/API_KEY=${GENERATED_KEY}/" .env; else printf '\nAPI_KEY=%s\n' "$GENERATED_KEY" >> .env; fi
   log "API key segura gerada automaticamente."
 fi
+
+CUDA_COMPAT_VALUE="$(grep -E '^VLLM_ENABLE_CUDA_COMPATIBILITY=' .env | head -n1 | cut -d= -f2- || true)"
+if [[ "$CUDA_COMPAT_VALUE" == "auto" ]]; then
+  DRIVER_VERSION="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1 | tr -d ' ')"
+  DRIVER_MAJOR="${DRIVER_VERSION%%.*}"
+  if [[ "$DRIVER_MAJOR" =~ ^[0-9]+$ ]] && (( DRIVER_MAJOR < 580 )); then
+    CUDA_COMPAT_VALUE=1
+    log "Driver ${DRIVER_VERSION}: ativando CUDA forward compatibility para o runtime CUDA 13."
+  else
+    CUDA_COMPAT_VALUE=0
+    log "Driver ${DRIVER_VERSION}: CUDA forward compatibility extra não é necessária."
+  fi
+  sed -i "s/^VLLM_ENABLE_CUDA_COMPATIBILITY=.*/VLLM_ENABLE_CUDA_COMPATIBILITY=${CUDA_COMPAT_VALUE}/" .env
+fi
+
 chmod 600 .env; chown "$OWNER_USER:$OWNER_GROUP" .env
 [[ "$OWNER_USER" == "root" ]] || usermod -aG docker "$OWNER_USER" || true
 chmod 0755 "$ROOT_DIR/info"; ln -sfn "$ROOT_DIR/info" /usr/local/bin/glm-info
@@ -112,7 +149,7 @@ fi
 
 log "Validando CUDA, vLLM, Transformers e DeepGEMM com a imagem de inferência..."
 docker run --rm --gpus all \
-  -e "VLLM_ENABLE_CUDA_COMPATIBILITY=${VLLM_ENABLE_CUDA_COMPATIBILITY:-1}" \
+  -e "VLLM_ENABLE_CUDA_COMPATIBILITY=${VLLM_ENABLE_CUDA_COMPATIBILITY}" \
   --entrypoint python3 "${VLLM_IMAGE}" \
   -c "import sys, vllm; import torch, deep_gemm; from importlib.metadata import version; from packaging.version import Version; n=torch.cuda.device_count(); vv=Version(vllm.__version__.split('+')[0]); tv=Version(version('transformers')); print(f'vLLM {vv}; Transformers {tv}; DeepGEMM OK; CUDA GPUs={n}; {torch.cuda.get_device_name(0) if n else \"none\"}'); sys.exit(0 if n >= ${TENSOR_PARALLEL_SIZE:-8} and vv >= Version('0.28.0') and tv >= Version('5.15.0') else 1)"
 
