@@ -15,15 +15,17 @@ HF_CACHE_PATH="${HF_CACHE_DIR:-/var/lib/glm53-full/huggingface}"
 VLLM_CACHE_PATH="${VLLM_CACHE_DIR:-/var/lib/glm53-full/vllm-cache}"
 MAX_LEN="${MAX_MODEL_LEN:-131072}"
 MAX_SEQS="${MAX_NUM_SEQS:-8}"
+MAX_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
 MTP_TOKENS="${MTP_SPECULATIVE_TOKENS:-5}"
 API_LISTEN_PORT="${API_PORT:-8000}"
 READY_TIMEOUT="${VLLM_ENGINE_READY_TIMEOUT_S:-7200}"
 GPU_UTIL="${GPU_MEMORY_UTILIZATION:-0.90}"
+CUDA_COMPAT="${VLLM_ENABLE_CUDA_COMPATIBILITY:-1}"
 
 # Valores abaixo também são lidos indiretamente por nome.
 # shellcheck disable=SC2034
-: "$MAX_LEN" "$READY_TIMEOUT" "$MAX_SEQS" "$MTP_TOKENS"
-for value_name in TP_SIZE EXPECTED_GPU_COUNT MIN_GPU_MEMORY_MIB MIN_HF_FREE_GIB MIN_DOCKER_FREE_GIB MIN_VLLM_CACHE_FREE_GIB MAX_LEN MAX_SEQS MTP_TOKENS API_LISTEN_PORT READY_TIMEOUT; do
+: "$MAX_LEN" "$READY_TIMEOUT" "$MAX_SEQS" "$MAX_BATCHED_TOKENS" "$MTP_TOKENS"
+for value_name in TP_SIZE EXPECTED_GPU_COUNT MIN_GPU_MEMORY_MIB MIN_HF_FREE_GIB MIN_DOCKER_FREE_GIB MIN_VLLM_CACHE_FREE_GIB MAX_LEN MAX_SEQS MAX_BATCHED_TOKENS MTP_TOKENS API_LISTEN_PORT READY_TIMEOUT; do
   value="${!value_name}"
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "${value_name} deve ser inteiro positivo; recebido: ${value}."
 done
@@ -31,15 +33,23 @@ done
 (( EXPECTED_GPU_COUNT >= TP_SIZE )) || die "EXPECTED_GPUS não pode ser menor que TENSOR_PARALLEL_SIZE."
 [[ "$GPU_UTIL" =~ ^(0\.[0-9]+|1(\.0+)?)$ ]] || die "GPU_MEMORY_UTILIZATION deve estar entre 0 e 1; recebido: ${GPU_UTIL}."
 awk -v v="$GPU_UTIL" 'BEGIN { exit !(v > 0 && v <= 1) }' || die "GPU_MEMORY_UTILIZATION deve ser >0 e <=1."
+[[ "$CUDA_COMPAT" =~ ^[01]$ ]] || die "VLLM_ENABLE_CUDA_COMPATIBILITY deve ser 0 ou 1."
 
 [[ -n "${MODEL_ID:-}" ]] || die "MODEL_ID não pode ficar vazio."
 [[ -n "${MODEL_REVISION:-}" ]] || die "MODEL_REVISION não pode ficar vazio."
 [[ -n "${SERVED_MODEL_NAME:-}" ]] || die "SERVED_MODEL_NAME não pode ficar vazio."
+[[ -n "${VLLM_BASE_IMAGE:-}" ]] || die "VLLM_BASE_IMAGE não pode ficar vazio."
 [[ -n "${VLLM_IMAGE:-}" ]] || die "VLLM_IMAGE não pode ficar vazio."
+[[ -n "${VLLM_SOURCE_REF:-}" ]] || die "VLLM_SOURCE_REF não pode ficar vazio."
+[[ -n "${DEEPGEMM_REF:-}" ]] || die "DEEPGEMM_REF não pode ficar vazio."
 [[ -n "${API_KEY:-}" && "${API_KEY}" != "CHANGE_ME" ]] || die "API_KEY ausente ou ainda definida como CHANGE_ME."
 [[ "${KV_CACHE_DTYPE:-fp8}" =~ ^(fp8|fp8_e4m3|auto)$ ]] || die "KV_CACHE_DTYPE deve ser fp8, fp8_e4m3 ou auto neste perfil."
 [[ "${VLLM_MEDIA_URL_ALLOW_REDIRECTS:-0}" =~ ^[01]$ ]] || die "VLLM_MEDIA_URL_ALLOW_REDIRECTS deve ser 0 ou 1."
 [[ "${ALLOWED_MEDIA_DOMAIN:-media.invalid}" != *[[:space:]]* ]] || die "ALLOWED_MEDIA_DOMAIN aceita um único domínio sem espaços."
+
+if (( MAX_BATCHED_TOKENS > 8192 )); then
+  warn "MAX_NUM_BATCHED_TOKENS=${MAX_BATCHED_TOKENS} aumenta o workspace de sparse decode. O perfil H200 validado começa em 8192 por segurança."
+fi
 
 command -v nvidia-smi >/dev/null 2>&1 || die "nvidia-smi não encontrado. Use uma imagem Azure com driver NVIDIA compatível."
 command -v docker >/dev/null 2>&1 || die "Docker não encontrado."
@@ -55,6 +65,18 @@ for ((i=0; i<EXPECTED_GPU_COUNT; i++)); do
   [[ "$mem" =~ ^[0-9]+$ ]] || die "Não foi possível interpretar a VRAM da GPU $i: $mem"
   (( mem >= MIN_GPU_MEMORY_MIB )) || die "GPU $i (${GPU_NAME[$i]:-desconhecida}) tem ${mem} MiB; este perfil exige >= ${MIN_GPU_MEMORY_MIB} MiB por GPU."
 done
+
+DRIVER_VERSION="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1 | tr -d ' ')"
+DRIVER_MAJOR="${DRIVER_VERSION%%.*}"
+if [[ "$DRIVER_MAJOR" =~ ^[0-9]+$ ]] && (( DRIVER_MAJOR < 580 )) && [[ "$CUDA_COMPAT" != "1" ]]; then
+  warn "Driver NVIDIA ${DRIVER_VERSION} é anterior à série R580. A imagem vLLM 0.28.0 usa CUDA 13; mantenha VLLM_ENABLE_CUDA_COMPATIBILITY=1 ou atualize o driver."
+fi
+
+if systemctl list-unit-files --no-legend 'nvidia-fabricmanager*.service' 2>/dev/null | grep -q .; then
+  if ! systemctl is-active --quiet nvidia-fabricmanager.service; then
+    warn "NVIDIA Fabric Manager foi detectado, mas não está ativo. Em nós H200/NVSwitch isso pode impedir comunicação correta entre GPUs."
+  fi
+fi
 
 mkdir -p "$HF_CACHE_PATH" "$VLLM_CACHE_PATH" || die "Não foi possível criar os diretórios de cache."
 DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
@@ -84,6 +106,5 @@ for device in "${!REQUIRED_GIB[@]}"; do
   log "Disco OK em ${device}: ${free} GiB livres para ${FS_LABELS[$device]} (mínimo agregado ${required} GiB)."
 done
 
-DRIVER_VERSION="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1 | tr -d ' ')"
 GPU_SUMMARY="$(printf '%s\n' "${GPU_NAME[@]:0:EXPECTED_GPU_COUNT}" | sort -u | paste -sd ';' -)"
-log "Pré-validação OK: ${EXPECTED_GPU_COUNT}/${GPU_COUNT} GPUs (${GPU_SUMMARY}); TP=${TP_SIZE}; driver ${DRIVER_VERSION}; >=${MIN_GPU_MEMORY_MIB} MiB/GPU."
+log "Pré-validação OK: ${EXPECTED_GPU_COUNT}/${GPU_COUNT} GPUs (${GPU_SUMMARY}); TP=${TP_SIZE}; driver ${DRIVER_VERSION}; >=${MIN_GPU_MEMORY_MIB} MiB/GPU; lote máximo=${MAX_BATCHED_TOKENS}."
