@@ -94,11 +94,27 @@ chmod 700 "$HF_CACHE_PATH" "$VLLM_CACHE_PATH"
 
 "$ROOT_DIR/scripts/preflight.sh"
 docker compose --env-file .env config >/dev/null
-log "Garantindo imagens necessárias sem trocar tags já instaladas..."
-docker compose --env-file .env pull --policy missing
 
-log "Validando CUDA, vLLM e Transformers com a imagem de inferência..."
-docker run --rm --gpus all --entrypoint python3 "${VLLM_IMAGE:-vllm/vllm-openai:v0.28.0}" -c "import sys, torch, vllm; from importlib.metadata import version; from packaging.version import Version; n=torch.cuda.device_count(); vv=Version(vllm.__version__.split('+')[0]); tv=Version(version('transformers')); print(f'vLLM {vv}; Transformers {tv}; CUDA GPUs={n}; {torch.cuda.get_device_name(0) if n else \"none\"}'); sys.exit(0 if n >= ${TENSOR_PARALLEL_SIZE:-8} and vv >= Version('0.28.0') and tv >= Version('5.15.0') else 1)"
+log "Garantindo a imagem do gateway sem trocar tags já instaladas..."
+docker compose --env-file .env pull --policy missing gateway
+
+if ! docker image inspect "${VLLM_IMAGE}" >/dev/null 2>&1; then
+  log "Construindo runtime GLM-5.3 com DeepGEMM fixado..."
+  docker build \
+    --build-arg "VLLM_BASE_IMAGE=${VLLM_BASE_IMAGE}" \
+    --build-arg "VLLM_SOURCE_REF=${VLLM_SOURCE_REF}" \
+    --build-arg "DEEPGEMM_REF=${DEEPGEMM_REF}" \
+    -t "${VLLM_IMAGE}" \
+    "$ROOT_DIR"
+else
+  log "Runtime ${VLLM_IMAGE} já existe; preservando a imagem validada. Use ./manage.sh update para reconstruir deliberadamente."
+fi
+
+log "Validando CUDA, vLLM, Transformers e DeepGEMM com a imagem de inferência..."
+docker run --rm --gpus all \
+  -e "VLLM_ENABLE_CUDA_COMPATIBILITY=${VLLM_ENABLE_CUDA_COMPATIBILITY:-1}" \
+  --entrypoint python3 "${VLLM_IMAGE}" \
+  -c "import sys, vllm; import torch, deep_gemm; from importlib.metadata import version; from packaging.version import Version; n=torch.cuda.device_count(); vv=Version(vllm.__version__.split('+')[0]); tv=Version(version('transformers')); print(f'vLLM {vv}; Transformers {tv}; DeepGEMM OK; CUDA GPUs={n}; {torch.cuda.get_device_name(0) if n else \"none\"}'); sys.exit(0 if n >= ${TENSOR_PARALLEL_SIZE:-8} and vv >= Version('0.28.0') and tv >= Version('5.15.0') else 1)"
 
 log "Subindo GLM-5.3 completo..."
 docker compose --env-file .env up -d --pull never
