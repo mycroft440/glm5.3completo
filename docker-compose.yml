@@ -1,3 +1,5 @@
+name: glm53-complete
+
 services:
   vllm:
     image: "${VLLM_IMAGE:-glm53-complete-vllm:0.28.0-deepgemm}"
@@ -10,11 +12,13 @@ services:
       VLLM_API_KEY: "${API_KEY}"
       VLLM_ENGINE_READY_TIMEOUT_S: "${VLLM_ENGINE_READY_TIMEOUT_S:-7200}"
       VLLM_MEDIA_URL_ALLOW_REDIRECTS: "${VLLM_MEDIA_URL_ALLOW_REDIRECTS:-0}"
-      VLLM_ENABLE_CUDA_COMPATIBILITY: "${VLLM_ENABLE_CUDA_COMPATIBILITY:-1}"
+      VLLM_ENABLE_CUDA_COMPATIBILITY: "${VLLM_ENABLE_CUDA_COMPATIBILITY:-0}"
       VLLM_CACHE_ROOT: /root/.cache/vllm
+      DG_JIT_CACHE_DIR: /root/.cache/deepgemm
     volumes:
       - "${HF_CACHE_DIR:-/var/lib/glm53-full/huggingface}:/root/.cache/huggingface"
       - "${VLLM_CACHE_DIR:-/var/lib/glm53-full/vllm-cache}:/root/.cache/vllm"
+      - "${DEEPGEMM_CACHE_DIR:-/var/lib/glm53-full/deepgemm-cache}:/root/.cache/deepgemm"
     deploy:
       resources:
         reservations:
@@ -25,9 +29,9 @@ services:
     command:
       - "${MODEL_ID:-zai-org/GLM-5.3}"
       - --revision
-      - "${MODEL_REVISION:-main}"
+      - "${MODEL_REVISION:-187fb9fff6319062325ff825627ef6db084d9bc6}"
       - --tokenizer-revision
-      - "${MODEL_REVISION:-main}"
+      - "${MODEL_REVISION:-187fb9fff6319062325ff825627ef6db084d9bc6}"
       - --tensor-parallel-size
       - "${TENSOR_PARALLEL_SIZE:-8}"
       - --max-model-len
@@ -60,7 +64,7 @@ services:
       - glm-internal
 
   gateway:
-    image: nginx:1.29-alpine
+    image: "${NGINX_IMAGE:-nginx@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de}"
     container_name: glm53-full-gateway
     restart: unless-stopped
     depends_on:
