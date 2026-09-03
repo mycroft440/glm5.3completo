@@ -6,9 +6,9 @@ source "$ROOT_DIR/scripts/lib.sh"
 load_env
 ORIGIN="$(api_origin)"
 
-status="$(curl -sS -o /dev/null -w '%{http_code}' "${ORIGIN}/v1/models")"
+status="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' "${ORIGIN}/v1/models")"
 [[ "$status" == "401" || "$status" == "403" ]] || die "A API deveria rejeitar /v1/models sem chave; HTTP: $status."
-status="$(curl -sS -o /dev/null -w '%{http_code}' "${ORIGIN}/invocations")"
+status="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' "${ORIGIN}/invocations")"
 [[ "$status" == "404" ]] || die "Gateway deveria bloquear /invocations; HTTP: $status."
 curl --fail-with-body -sS --max-time 30 -H "Authorization: Bearer ${API_KEY}" "${ORIGIN}/v1/models" >/dev/null
 
