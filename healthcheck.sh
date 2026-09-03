@@ -13,12 +13,17 @@ grep -qx 'gateway' <<<"$RUNNING_SERVICES" || die "Container gateway não está e
 curl --fail-with-body -sS --max-time 15 -H "Authorization: Bearer ${API_KEY}" "${ORIGIN}/v1/models" >/dev/null || die "API ainda não respondeu em ${ORIGIN}/v1/models."
 
 if [[ "${1:-}" == "--deep" ]]; then
+  PAYLOAD="$(jq -nc --arg model "${SERVED_MODEL_NAME:-glm-5.3}" \
+    '{model:$model,messages:[{role:"user",content:"Responda incluindo exatamente HEALTH_OK."}],max_tokens:128,temperature:1.0,chat_template_kwargs:{reasoning_effort:"low",clear_thinking:true}}')"
   RESPONSE="$(curl --fail-with-body -sS --max-time 600 "${ORIGIN}/v1/chat/completions" \
     -H 'Content-Type: application/json' \
     -H "Authorization: Bearer ${API_KEY}" \
-    -d "$(jq -nc --arg model "${SERVED_MODEL_NAME:-glm-5.3}" '{model:$model,messages:[{role:"user",content:"Responda incluindo exatamente HEALTH_OK."}],max_tokens:128,temperature:1.0,chat_template_kwargs:{reasoning_effort:"low",clear_thinking:true}}')")")"
-  printf '%s\n' "$RESPONSE" | jq -e '.choices[0].message.content | strings | contains("HEALTH_OK")' >/dev/null || die "API respondeu /v1/models, mas a inferência real falhou no healthcheck profundo."
-  printf '%s\n' "$RESPONSE" | jq -e '(.choices[0].message.content // "") | (contains("<think") or contains("</think>")) | not' >/dev/null || die "Raciocínio bruto vazou para message.content."
+    -d "$PAYLOAD")"
+  printf '%s\n' "$RESPONSE" | jq -e '.choices[0].message.content | strings | contains("HEALTH_OK")' >/dev/null \
+    || die "API respondeu /v1/models, mas a inferência real falhou no healthcheck profundo."
+  printf '%s\n' "$RESPONSE" | jq -e \
+    '(.choices[0].message.content // "") | (contains("<think") or contains("</think>")) | not' >/dev/null \
+    || die "Raciocínio bruto vazou para message.content."
   log "API + inferência saudáveis em ${ORIGIN}/v1"
 else
   log "API pronta em ${ORIGIN}/v1 (healthcheck superficial)."
