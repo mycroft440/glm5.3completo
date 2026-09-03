@@ -33,13 +33,14 @@ done
 (( EXPECTED_GPU_COUNT >= TP_SIZE )) || die "EXPECTED_GPUS não pode ser menor que TENSOR_PARALLEL_SIZE."
 [[ "$GPU_UTIL" =~ ^(0\.[0-9]+|1(\.0+)?)$ ]] || die "GPU_MEMORY_UTILIZATION deve estar entre 0 e 1; recebido: ${GPU_UTIL}."
 awk -v v="$GPU_UTIL" 'BEGIN { exit !(v > 0 && v <= 1) }' || die "GPU_MEMORY_UTILIZATION deve ser >0 e <=1."
-[[ "$CUDA_COMPAT" =~ ^[01]$ ]] || die "VLLM_ENABLE_CUDA_COMPATIBILITY deve ser 0 ou 1."
+[[ "$CUDA_COMPAT" =~ ^[01]$ ]] || die "VLLM_ENABLE_CUDA_COMPATIBILITY deve ser 0 ou 1. Execute install.sh para resolver o modo auto antes do preflight."
 
 [[ -n "${MODEL_ID:-}" ]] || die "MODEL_ID não pode ficar vazio."
 [[ -n "${MODEL_REVISION:-}" ]] || die "MODEL_REVISION não pode ficar vazio."
 [[ -n "${SERVED_MODEL_NAME:-}" ]] || die "SERVED_MODEL_NAME não pode ficar vazio."
 [[ -n "${VLLM_BASE_IMAGE:-}" ]] || die "VLLM_BASE_IMAGE não pode ficar vazio."
 [[ -n "${VLLM_IMAGE:-}" ]] || die "VLLM_IMAGE não pode ficar vazio."
+[[ "${VLLM_IMAGE}" != "${VLLM_BASE_IMAGE}" ]] || die "VLLM_IMAGE deve ser uma tag local diferente de VLLM_BASE_IMAGE; usar a mesma tag poderia sobrescrever a imagem oficial durante o build."
 [[ -n "${VLLM_SOURCE_REF:-}" ]] || die "VLLM_SOURCE_REF não pode ficar vazio."
 [[ -n "${DEEPGEMM_REF:-}" ]] || die "DEEPGEMM_REF não pode ficar vazio."
 [[ -n "${API_KEY:-}" && "${API_KEY}" != "CHANGE_ME" ]] || die "API_KEY ausente ou ainda definida como CHANGE_ME."
@@ -48,7 +49,7 @@ awk -v v="$GPU_UTIL" 'BEGIN { exit !(v > 0 && v <= 1) }' || die "GPU_MEMORY_UTIL
 [[ "${ALLOWED_MEDIA_DOMAIN:-media.invalid}" != *[[:space:]]* ]] || die "ALLOWED_MEDIA_DOMAIN aceita um único domínio sem espaços."
 
 if (( MAX_BATCHED_TOKENS > 8192 )); then
-  warn "MAX_NUM_BATCHED_TOKENS=${MAX_BATCHED_TOKENS} aumenta o workspace de sparse decode. O perfil H200 validado começa em 8192 por segurança."
+  warn "MAX_NUM_BATCHED_TOKENS=${MAX_BATCHED_TOKENS} aumenta o workspace de sparse decode. O perfil H200 conservador começa em 8192 por segurança."
 fi
 
 command -v nvidia-smi >/dev/null 2>&1 || die "nvidia-smi não encontrado. Use uma imagem Azure com driver NVIDIA compatível."
