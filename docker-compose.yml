@@ -2,7 +2,7 @@ name: glm53-complete
 
 services:
   vllm:
-    image: "${VLLM_IMAGE:-glm53-complete-vllm:0.28.0-deepgemm}"
+    image: "${VLLM_IMAGE}"
     container_name: glm53-full-vllm
     restart: unless-stopped
     ipc: host
@@ -12,49 +12,10 @@ services:
       VLLM_API_KEY: "${API_KEY}"
       VLLM_ENGINE_READY_TIMEOUT_S: "${VLLM_ENGINE_READY_TIMEOUT_S:-7200}"
       VLLM_MEDIA_URL_ALLOW_REDIRECTS: "${VLLM_MEDIA_URL_ALLOW_REDIRECTS:-0}"
-      VLLM_ENABLE_CUDA_COMPATIBILITY: "${VLLM_ENABLE_CUDA_COMPATIBILITY:-0}"
       VLLM_CACHE_ROOT: /root/.cache/vllm
-      DG_JIT_CACHE_DIR: /root/.cache/deepgemm
     volumes:
       - "${HF_CACHE_DIR:-/var/lib/glm53-full/huggingface}:/root/.cache/huggingface"
       - "${VLLM_CACHE_DIR:-/var/lib/glm53-full/vllm-cache}:/root/.cache/vllm"
-      - "${DEEPGEMM_CACHE_DIR:-/var/lib/glm53-full/deepgemm-cache}:/root/.cache/deepgemm"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    command:
-      - "${MODEL_ID:-zai-org/GLM-5.3}"
-      - --revision
-      - "${MODEL_REVISION:-187fb9fff6319062325ff825627ef6db084d9bc6}"
-      - --tokenizer-revision
-      - "${MODEL_REVISION:-187fb9fff6319062325ff825627ef6db084d9bc6}"
-      - --tensor-parallel-size
-      - "${TENSOR_PARALLEL_SIZE:-8}"
-      - --max-model-len
-      - "${MAX_MODEL_LEN:-131072}"
-      - --max-num-seqs
-      - "${MAX_NUM_SEQS:-8}"
-      - --max-num-batched-tokens
-      - "${MAX_NUM_BATCHED_TOKENS:-8192}"
-      - --gpu-memory-utilization
-      - "${GPU_MEMORY_UTILIZATION:-0.90}"
-      - --kv-cache-dtype
-      - "${KV_CACHE_DTYPE:-fp8}"
-      - --speculative-config
-      - "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_SPECULATIVE_TOKENS:-5}}"
-      - --tool-call-parser
-      - glm47
-      - --enable-auto-tool-choice
-      - --reasoning-parser
-      - glm45
-      - --served-model-name
-      - "${SERVED_MODEL_NAME:-glm-5.3}"
-      - --allowed-media-domains
-      - "${ALLOWED_MEDIA_DOMAIN:-media.invalid}"
     logging:
       driver: json-file
       options:
@@ -64,7 +25,7 @@ services:
       - glm-internal
 
   gateway:
-    image: "${NGINX_IMAGE:-nginx@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de}"
+    image: "${NGINX_IMAGE}"
     container_name: glm53-full-gateway
     restart: unless-stopped
     depends_on:

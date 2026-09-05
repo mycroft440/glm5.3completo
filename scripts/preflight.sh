@@ -4,64 +4,45 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib.sh
 source "$ROOT_DIR/scripts/lib.sh"
 [[ -f "$ROOT_DIR/.env" ]] && load_env
+require_resolved_profile
 
 TP_SIZE="${TENSOR_PARALLEL_SIZE:-8}"
 EXPECTED_GPU_COUNT="${EXPECTED_GPUS:-$TP_SIZE}"
 STRICT_GPU_COUNT_VALUE="${STRICT_GPU_COUNT:-1}"
-EXPECTED_GPU_PATTERN="${EXPECTED_GPU_NAME_REGEX:-H200}"
-MIN_GPU_MEMORY_MIB="${MIN_GPU_MEMORY_MIB:-130000}"
 MIN_HOST_RAM="${MIN_HOST_RAM_GIB:-1400}"
-REQUIRE_FM="${REQUIRE_FABRIC_MANAGER:-1}"
 MIN_HF_FREE_GIB="${MIN_FREE_DISK_GIB:-1200}"
 MIN_DOCKER_FREE_GIB="${MIN_DOCKER_FREE_DISK_GIB:-100}"
 MIN_VLLM_CACHE_FREE_GIB="${MIN_VLLM_CACHE_FREE_DISK_GIB:-30}"
-MIN_DG_CACHE_FREE_GIB="${MIN_DEEPGEMM_CACHE_FREE_DISK_GIB:-20}"
 HF_CACHE_PATH="${HF_CACHE_DIR:-/var/lib/glm53-full/huggingface}"
 VLLM_CACHE_PATH="${VLLM_CACHE_DIR:-/var/lib/glm53-full/vllm-cache}"
-DG_CACHE_PATH="${DEEPGEMM_CACHE_DIR:-/var/lib/glm53-full/deepgemm-cache}"
-MAX_LEN="${MAX_MODEL_LEN:-131072}"
-MAX_SEQS="${MAX_NUM_SEQS:-8}"
-MAX_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
-MTP_TOKENS="${MTP_SPECULATIVE_TOKENS:-5}"
 API_LISTEN_PORT="${API_PORT:-8000}"
 READY_TIMEOUT="${VLLM_ENGINE_READY_TIMEOUT_S:-7200}"
-GPU_UTIL="${GPU_MEMORY_UTILIZATION:-0.90}"
-CUDA_COMPAT="${VLLM_ENABLE_CUDA_COMPATIBILITY:-0}"
+GPU_UTIL="${GPU_MEMORY_UTILIZATION:-0.80}"
+MTP_TOKENS="${MTP_SPECULATIVE_TOKENS:-5}"
+MAX_LEN="${MAX_MODEL_LEN:-524288}"
+MAX_SEQS="${MAX_NUM_SEQS:-32}"
 
-# Valores abaixo também são lidos indiretamente por nome.
-# shellcheck disable=SC2034
-: "$MAX_LEN" "$READY_TIMEOUT" "$MAX_SEQS" "$MAX_BATCHED_TOKENS" "$MTP_TOKENS"
-for value_name in TP_SIZE EXPECTED_GPU_COUNT MIN_GPU_MEMORY_MIB MIN_HOST_RAM MIN_HF_FREE_GIB MIN_DOCKER_FREE_GIB MIN_VLLM_CACHE_FREE_GIB MIN_DG_CACHE_FREE_GIB MAX_LEN MAX_SEQS MAX_BATCHED_TOKENS MTP_TOKENS API_LISTEN_PORT READY_TIMEOUT; do
+for value_name in TP_SIZE EXPECTED_GPU_COUNT MIN_HOST_RAM MIN_HF_FREE_GIB MIN_DOCKER_FREE_GIB MIN_VLLM_CACHE_FREE_GIB MAX_LEN MAX_SEQS MTP_TOKENS API_LISTEN_PORT READY_TIMEOUT; do
   value="${!value_name}"
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "${value_name} deve ser inteiro positivo; recebido: ${value}."
 done
-for bool_value in "$STRICT_GPU_COUNT_VALUE" "$REQUIRE_FM" "$CUDA_COMPAT"; do
-  [[ "$bool_value" =~ ^[01]$ ]] || die "Flags STRICT_GPU_COUNT, REQUIRE_FABRIC_MANAGER e VLLM_ENABLE_CUDA_COMPATIBILITY devem ser 0 ou 1."
-done
+[[ "$STRICT_GPU_COUNT_VALUE" =~ ^[01]$ ]] || die "STRICT_GPU_COUNT deve ser 0 ou 1."
 (( API_LISTEN_PORT <= 65535 )) || die "API_PORT deve estar entre 1 e 65535."
 (( EXPECTED_GPU_COUNT >= TP_SIZE )) || die "EXPECTED_GPUS não pode ser menor que TENSOR_PARALLEL_SIZE."
-[[ "$GPU_UTIL" =~ ^(0\.[0-9]+|1(\.0+)?)$ ]] || die "GPU_MEMORY_UTILIZATION deve estar entre 0 e 1; recebido: ${GPU_UTIL}."
+[[ "$GPU_UTIL" =~ ^(0\.[0-9]+|1(\.0+)?)$ ]] || die "GPU_MEMORY_UTILIZATION inválido: ${GPU_UTIL}."
 awk -v v="$GPU_UTIL" 'BEGIN { exit !(v > 0 && v <= 1) }' || die "GPU_MEMORY_UTILIZATION deve ser >0 e <=1."
 
 [[ -n "${MODEL_ID:-}" ]] || die "MODEL_ID não pode ficar vazio."
-[[ "${MODEL_REVISION:-}" =~ ^[0-9a-fA-F]{40}$ ]] || die "MODEL_REVISION deve ser um commit Hugging Face de 40 caracteres; não use main em produção."
+[[ "${MODEL_REVISION:-}" =~ ^[0-9a-fA-F]{40}$ ]] || die "MODEL_REVISION deve ser commit Hugging Face de 40 caracteres."
 [[ -n "${SERVED_MODEL_NAME:-}" ]] || die "SERVED_MODEL_NAME não pode ficar vazio."
 [[ "${VLLM_BASE_IMAGE:-}" == *@sha256:* ]] || die "VLLM_BASE_IMAGE deve estar fixada por digest sha256."
-[[ -n "${VLLM_IMAGE:-}" ]] || die "VLLM_IMAGE não pode ficar vazio."
-[[ "${VLLM_IMAGE}" != "${VLLM_BASE_IMAGE}" ]] || die "VLLM_IMAGE deve ser uma tag local diferente de VLLM_BASE_IMAGE."
+[[ -n "${VLLM_IMAGE:-}" && "${VLLM_IMAGE}" != "auto" ]] || die "VLLM_IMAGE não foi resolvida."
+[[ -n "${VLLM_DOCKERFILE:-}" && "${VLLM_DOCKERFILE}" != "auto" ]] || die "VLLM_DOCKERFILE não foi resolvido."
 [[ "${NGINX_IMAGE:-}" == *@sha256:* ]] || die "NGINX_IMAGE deve estar fixada por digest sha256."
-[[ -n "${VLLM_SOURCE_REF:-}" ]] || die "VLLM_SOURCE_REF não pode ficar vazio."
-[[ -n "${DEEPGEMM_REF:-}" ]] || die "DEEPGEMM_REF não pode ficar vazio."
 [[ -n "${API_KEY:-}" && "${API_KEY}" != "CHANGE_ME" ]] || die "API_KEY ausente ou ainda definida como CHANGE_ME."
-[[ "${KV_CACHE_DTYPE:-fp8}" =~ ^(fp8|fp8_e4m3|auto)$ ]] || die "KV_CACHE_DTYPE deve ser fp8, fp8_e4m3 ou auto neste perfil."
 [[ "${VLLM_MEDIA_URL_ALLOW_REDIRECTS:-0}" =~ ^[01]$ ]] || die "VLLM_MEDIA_URL_ALLOW_REDIRECTS deve ser 0 ou 1."
 [[ "${ALLOWED_MEDIA_DOMAIN:-media.invalid}" != *[[:space:]]* ]] || die "ALLOWED_MEDIA_DOMAIN aceita um único domínio sem espaços."
 
-if (( MAX_BATCHED_TOKENS > 8192 )); then
-  warn "MAX_NUM_BATCHED_TOKENS=${MAX_BATCHED_TOKENS} aumenta o workspace de sparse decode. O perfil H200 conservador começa em 8192."
-fi
-
-command -v nvidia-smi >/dev/null 2>&1 || die "nvidia-smi não encontrado. Use a imagem Azure HPC A100+ recomendada."
 command -v docker >/dev/null 2>&1 || die "Docker não encontrado."
 docker compose version >/dev/null 2>&1 || die "Docker Compose não encontrado."
 docker info >/dev/null 2>&1 || die "Docker daemon não está acessível."
@@ -69,45 +50,117 @@ docker info >/dev/null 2>&1 || die "Docker daemon não está acessível."
 MEM_TOTAL_KIB="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
 [[ "$MEM_TOTAL_KIB" =~ ^[0-9]+$ ]] || die "Não foi possível ler a RAM do host."
 HOST_RAM_GIB="$(( MEM_TOTAL_KIB / 1024 / 1024 ))"
-(( HOST_RAM_GIB >= MIN_HOST_RAM )) || die "RAM insuficiente: ${HOST_RAM_GIB} GiB detectados; perfil exige >= ${MIN_HOST_RAM} GiB."
+(( HOST_RAM_GIB >= MIN_HOST_RAM )) || die "RAM insuficiente: ${HOST_RAM_GIB} GiB; mínimo ${MIN_HOST_RAM} GiB."
 
-mapfile -t GPU_MEM < <(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | tr -d ' ')
-mapfile -t GPU_NAME < <(nvidia-smi --query-gpu=name --format=csv,noheader)
-GPU_COUNT="${#GPU_MEM[@]}"
-if [[ "$STRICT_GPU_COUNT_VALUE" == "1" ]]; then
-  (( GPU_COUNT == EXPECTED_GPU_COUNT )) || die "Este perfil exige exatamente ${EXPECTED_GPU_COUNT} GPUs; detectadas: ${GPU_COUNT}."
-else
-  (( GPU_COUNT >= EXPECTED_GPU_COUNT )) || die "São necessárias pelo menos ${EXPECTED_GPU_COUNT} GPUs; detectadas: ${GPU_COUNT}."
-fi
-for ((i=0; i<EXPECTED_GPU_COUNT; i++)); do
-  mem="${GPU_MEM[$i]}"
-  name="${GPU_NAME[$i]:-desconhecida}"
-  [[ "$mem" =~ ^[0-9]+$ ]] || die "Não foi possível interpretar a VRAM da GPU $i: $mem"
-  (( mem >= MIN_GPU_MEMORY_MIB )) || die "GPU $i (${name}) tem ${mem} MiB; este perfil exige >= ${MIN_GPU_MEMORY_MIB} MiB por GPU."
-  [[ "$name" =~ $EXPECTED_GPU_PATTERN ]] || die "GPU $i (${name}) não corresponde a EXPECTED_GPU_NAME_REGEX=${EXPECTED_GPU_PATTERN}."
-done
-UNIQUE_GPU_NAMES="$(printf '%s\n' "${GPU_NAME[@]:0:EXPECTED_GPU_COUNT}" | sort -u | wc -l | tr -d ' ')"
-[[ "$UNIQUE_GPU_NAMES" == "1" ]] || die "Topologia heterogênea detectada entre as GPUs selecionadas; use GPUs idênticas."
+validate_nvidia() {
+  local expected_pattern="${EXPECTED_GPU_NAME_REGEX:-H200}"
+  local min_mem="${MIN_GPU_MEMORY_MIB:-130000}"
+  local require_fm="${REQUIRE_FABRIC_MANAGER:-1}"
+  local cuda_compat="${VLLM_ENABLE_CUDA_COMPATIBILITY:-0}"
+  local driver_version driver_major topo_output nvlink_rows unique_names gpu_count_value mem name i
+  local -a gpu_mem gpu_name
 
-DRIVER_VERSION="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1 | tr -d ' ')"
-DRIVER_MAJOR="${DRIVER_VERSION%%.*}"
-if [[ "$DRIVER_MAJOR" =~ ^[0-9]+$ ]] && (( DRIVER_MAJOR < 580 )) && [[ "$CUDA_COMPAT" != "1" ]]; then
-  die "Driver NVIDIA ${DRIVER_VERSION} é anterior a R580 e CUDA forward compatibility não está ativa. Execute install.sh."
-fi
+  command -v nvidia-smi >/dev/null 2>&1 || die "nvidia-smi não encontrado para perfil NVIDIA."
+  mapfile -t gpu_mem < <(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | tr -d ' ')
+  mapfile -t gpu_name < <(nvidia-smi --query-gpu=name --format=csv,noheader)
+  gpu_count_value="${#gpu_mem[@]}"
+  if [[ "$STRICT_GPU_COUNT_VALUE" == "1" ]]; then
+    (( gpu_count_value == EXPECTED_GPU_COUNT )) || die "Perfil NVIDIA exige exatamente ${EXPECTED_GPU_COUNT} GPUs; detectadas ${gpu_count_value}."
+  else
+    (( gpu_count_value >= EXPECTED_GPU_COUNT )) || die "São necessárias pelo menos ${EXPECTED_GPU_COUNT} GPUs."
+  fi
+  [[ "$min_mem" =~ ^[1-9][0-9]*$ ]] || die "MIN_GPU_MEMORY_MIB inválido."
+  for ((i=0; i<EXPECTED_GPU_COUNT; i++)); do
+    mem="${gpu_mem[$i]}"
+    name="${gpu_name[$i]:-desconhecida}"
+    [[ "$mem" =~ ^[0-9]+$ ]] || die "VRAM inválida na GPU ${i}: ${mem}"
+    (( mem >= min_mem )) || die "GPU ${i} (${name}) tem ${mem} MiB; mínimo ${min_mem}."
+    [[ "$name" =~ $expected_pattern ]] || die "GPU ${i} (${name}) não corresponde a ${expected_pattern}."
+  done
+  unique_names="$(printf '%s\n' "${gpu_name[@]:0:EXPECTED_GPU_COUNT}" | sort -u | wc -l | tr -d ' ')"
+  [[ "$unique_names" == "1" ]] || die "GPUs NVIDIA heterogêneas detectadas."
 
-TOPO_OUTPUT="$(nvidia-smi topo -m 2>/dev/null || true)"
-[[ -n "$TOPO_OUTPUT" ]] || die "Não foi possível ler a topologia NVIDIA."
-NVLINK_ROWS="$(printf '%s\n' "$TOPO_OUTPUT" | awk '/^GPU[0-9]+/ && /NV[0-9]+/ {c++} END {print c+0}')"
-(( NVLINK_ROWS >= EXPECTED_GPU_COUNT )) || die "A topologia não mostra NVLink/NVSwitch para todas as GPUs esperadas."
+  driver_version="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1 | tr -d ' ')"
+  driver_major="${driver_version%%.*}"
+  if [[ "$driver_major" =~ ^[0-9]+$ ]] && (( driver_major < 580 )) && [[ "$cuda_compat" != "1" ]]; then
+    die "Driver NVIDIA ${driver_version} < R580 e CUDA compatibility não está ativa."
+  fi
 
-if [[ "$REQUIRE_FM" == "1" ]]; then
-  systemctl list-unit-files --no-legend 2>/dev/null | grep -q '^nvidia-fabricmanager\.service' || die "NVIDIA Fabric Manager não está instalado/registrado."
-  systemctl is-active --quiet nvidia-fabricmanager.service || die "NVIDIA Fabric Manager está instalado, mas não está ativo."
-elif systemctl list-unit-files --no-legend 2>/dev/null | grep -q '^nvidia-fabricmanager\.service'; then
-  systemctl is-active --quiet nvidia-fabricmanager.service || warn "NVIDIA Fabric Manager foi detectado, mas não está ativo."
-fi
+  topo_output="$(nvidia-smi topo -m 2>/dev/null || true)"
+  [[ -n "$topo_output" ]] || die "Não foi possível ler topologia NVIDIA."
+  nvlink_rows="$(printf '%s\n' "$topo_output" | awk '/^GPU[0-9]+/ && /NV[0-9]+/ {c++} END {print c+0}')"
+  (( nvlink_rows >= EXPECTED_GPU_COUNT )) || die "NVLink/NVSwitch não aparece para todas as GPUs esperadas."
 
-mkdir -p "$HF_CACHE_PATH" "$VLLM_CACHE_PATH" "$DG_CACHE_PATH" || die "Não foi possível criar os diretórios de cache."
+  if [[ "$require_fm" == "1" ]]; then
+    systemctl list-unit-files --no-legend 2>/dev/null | grep -q '^nvidia-fabricmanager\.service' || die "NVIDIA Fabric Manager ausente."
+    systemctl is-active --quiet nvidia-fabricmanager.service || die "NVIDIA Fabric Manager não está ativo."
+  fi
+  log "NVIDIA OK: ${gpu_count_value} GPUs; driver ${driver_version}; NVLink/NVSwitch OK."
+}
+
+validate_rocm() {
+  local expected_arch="${EXPECTED_GPU_ARCH:-gfx942}"
+  local min_mem_mib="${MIN_GPU_MEMORY_MIB:-180000}"
+  local gfx_count card_count=0 memory_checked=0 mem_bytes mem_mib vendor card
+  local -a amd_cards=()
+
+  [[ -e /dev/kfd ]] || die "/dev/kfd ausente. Use a imagem Azure Ubuntu HPC ROCm para MI300X."
+  [[ -d /dev/dri ]] || die "/dev/dri ausente. ROCm não poderá acessar as GPUs."
+  command -v rocminfo >/dev/null 2>&1 || die "rocminfo não encontrado. Use microsoft-dsvm:ubuntu-hpc:2404-rocm."
+  command -v rocm-smi >/dev/null 2>&1 || die "rocm-smi não encontrado."
+
+  gfx_count="$(rocminfo 2>/dev/null | grep -Ec "Name:[[:space:]]+${expected_arch}" || true)"
+  if [[ "$STRICT_GPU_COUNT_VALUE" == "1" ]]; then
+    (( gfx_count == EXPECTED_GPU_COUNT )) || die "Perfil ROCm exige exatamente ${EXPECTED_GPU_COUNT} agentes ${expected_arch}; detectados ${gfx_count}."
+  else
+    (( gfx_count >= EXPECTED_GPU_COUNT )) || die "São necessários pelo menos ${EXPECTED_GPU_COUNT} agentes ${expected_arch}."
+  fi
+
+  for card in /sys/class/drm/card[0-9]*; do
+    [[ -r "$card/device/vendor" ]] || continue
+    vendor="$(<"$card/device/vendor")"
+    [[ "$vendor" == "0x1002" ]] || continue
+    amd_cards+=("$card")
+  done
+  card_count="${#amd_cards[@]}"
+  (( card_count >= EXPECTED_GPU_COUNT )) || die "Menos de ${EXPECTED_GPU_COUNT} GPUs AMD visíveis em /sys/class/drm: ${card_count}."
+
+  [[ "$min_mem_mib" =~ ^[1-9][0-9]*$ ]] || die "MIN_GPU_MEMORY_MIB inválido."
+  for card in "${amd_cards[@]:0:EXPECTED_GPU_COUNT}"; do
+    if [[ -r "$card/device/mem_info_vram_total" ]]; then
+      mem_bytes="$(<"$card/device/mem_info_vram_total")"
+      if [[ "$mem_bytes" =~ ^[0-9]+$ ]]; then
+        mem_mib="$(( mem_bytes / 1024 / 1024 ))"
+        (( mem_mib >= min_mem_mib )) || die "${card} tem ${mem_mib} MiB; mínimo ${min_mem_mib} MiB."
+        memory_checked=$((memory_checked + 1))
+      fi
+    fi
+  done
+  if (( memory_checked < EXPECTED_GPU_COUNT )); then
+    warn "VRAM não pôde ser confirmada por sysfs em todas as GPUs; a validação dentro do container ROCm será obrigatória."
+  fi
+
+  rocm-smi --showtopo >/dev/null 2>&1 || die "rocm-smi não conseguiu consultar a topologia Infinity Fabric."
+  log "ROCm OK: ${gfx_count} GPUs ${expected_arch}; dispositivos KFD/DRI e topologia acessíveis."
+}
+
+case "$ACCELERATOR_PROFILE" in
+  nvidia)
+    [[ "${KV_CACHE_DTYPE:-}" =~ ^(fp8|fp8_e4m3|auto)$ ]] || die "KV_CACHE_DTYPE NVIDIA inválido."
+    [[ "${MAX_NUM_BATCHED_TOKENS:-}" =~ ^[1-9][0-9]*$ ]] || die "MAX_NUM_BATCHED_TOKENS deve ser positivo no perfil NVIDIA."
+    if (( MAX_NUM_BATCHED_TOKENS > 8192 )); then
+      warn "MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS} aumenta o workspace sparse-decode; 8192 é o baseline conservador H200."
+    fi
+    validate_nvidia
+    ;;
+  rocm)
+    [[ "${KV_CACHE_DTYPE:-}" == "fp8_e4m3" ]] || die "Perfil MI300X exige KV_CACHE_DTYPE=fp8_e4m3."
+    [[ "${MAX_NUM_BATCHED_TOKENS:-0}" == "0" ]] || warn "MAX_NUM_BATCHED_TOKENS é ignorado no perfil ROCm para seguir o recipe oficial."
+    validate_rocm
+    ;;
+esac
+
+mkdir -p "$HF_CACHE_PATH" "$VLLM_CACHE_PATH" || die "Não foi possível criar diretórios de cache."
 DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
 [[ -n "$DOCKER_ROOT" ]] || die "Não foi possível descobrir DockerRootDir."
 
@@ -117,24 +170,35 @@ declare -A FS_LABELS=()
 add_disk_requirement() {
   local path="$1" required="$2" label="$3" probe="$1" device free_kib free_gib
   if ! df -Pk "$probe" >/dev/null 2>&1; then probe="$(dirname -- "$path")"; fi
-  df -Pk "$probe" >/dev/null 2>&1 || die "Não foi possível medir espaço livre para ${label} em ${path}."
+  df -Pk "$probe" >/dev/null 2>&1 || die "Não foi possível medir espaço para ${label} em ${path}."
   device="$(df -Pk "$probe" | awk 'NR==2 {print $1}')"
   free_kib="$(df -Pk "$probe" | awk 'NR==2 {print $4}')"
   [[ -n "$device" && "$free_kib" =~ ^[0-9]+$ ]] || die "Falha ao interpretar filesystem de ${label}."
   free_gib="$(( free_kib / 1024 / 1024 ))"
   REQUIRED_GIB["$device"]="$(( ${REQUIRED_GIB[$device]:-0} + required ))"
   FREE_GIB["$device"]="$free_gib"
-  if [[ -n "${FS_LABELS[$device]:-}" ]]; then FS_LABELS["$device"]+=" + ${label}"; else FS_LABELS["$device"]="$label"; fi
+  if [[ -n "${FS_LABELS[$device]:-}" ]]; then
+    FS_LABELS["$device"]+=" + ${label}"
+  else
+    FS_LABELS["$device"]="$label"
+  fi
 }
 add_disk_requirement "$HF_CACHE_PATH" "$MIN_HF_FREE_GIB" "pesos/Hugging Face"
 add_disk_requirement "$VLLM_CACHE_PATH" "$MIN_VLLM_CACHE_FREE_GIB" "cache vLLM"
-add_disk_requirement "$DG_CACHE_PATH" "$MIN_DG_CACHE_FREE_GIB" "cache JIT DeepGEMM"
 add_disk_requirement "$DOCKER_ROOT" "$MIN_DOCKER_FREE_GIB" "Docker"
+if [[ "$ACCELERATOR_PROFILE" == "nvidia" ]]; then
+  DG_CACHE_PATH="${DEEPGEMM_CACHE_DIR:-/var/lib/glm53-full/deepgemm-cache}"
+  DG_REQ="${MIN_DEEPGEMM_CACHE_FREE_DISK_GIB:-20}"
+  [[ "$DG_REQ" =~ ^[1-9][0-9]*$ ]] || die "MIN_DEEPGEMM_CACHE_FREE_DISK_GIB inválido."
+  mkdir -p "$DG_CACHE_PATH"
+  add_disk_requirement "$DG_CACHE_PATH" "$DG_REQ" "cache JIT DeepGEMM"
+fi
+
 for device in "${!REQUIRED_GIB[@]}"; do
-  required="${REQUIRED_GIB[$device]}"; free="${FREE_GIB[$device]}"
-  (( free >= required )) || die "Espaço insuficiente em ${device} (${FS_LABELS[$device]}): ${free} GiB livres; mínimo agregado: ${required} GiB."
-  log "Disco OK em ${device}: ${free} GiB livres para ${FS_LABELS[$device]} (mínimo agregado ${required} GiB)."
+  required="${REQUIRED_GIB[$device]}"
+  free="${FREE_GIB[$device]}"
+  (( free >= required )) || die "Espaço insuficiente em ${device} (${FS_LABELS[$device]}): ${free} GiB livres; mínimo ${required} GiB."
+  log "Disco OK em ${device}: ${free} GiB livres para ${FS_LABELS[$device]} (mínimo ${required} GiB)."
 done
 
-GPU_SUMMARY="$(printf '%s\n' "${GPU_NAME[@]:0:EXPECTED_GPU_COUNT}" | sort -u | paste -sd ';' -)"
-log "Pré-validação OK: ${EXPECTED_GPU_COUNT}/${GPU_COUNT} GPUs (${GPU_SUMMARY}); TP=${TP_SIZE}; RAM=${HOST_RAM_GIB} GiB; driver ${DRIVER_VERSION}; NVLink/NVSwitch OK; lote máximo=${MAX_BATCHED_TOKENS}."
+log "Pré-validação OK: perfil=${ACCELERATOR_PROFILE}; GPUs=${EXPECTED_GPU_COUNT}; TP=${TP_SIZE}; RAM=${HOST_RAM_GIB} GiB; contexto=${MAX_LEN}; seqs=${MAX_SEQS}."

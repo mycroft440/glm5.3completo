@@ -1,0 +1,11 @@
+ARG VLLM_BASE_IMAGE=vllm/vllm-openai-rocm@sha256:e0a3b2bd3fe7ec563916c3a5d949898d133458c18d6b2f460c906885cfb32032
+FROM ${VLLM_BASE_IMAGE}
+
+USER root
+
+COPY scripts/patch_vllm_agent_compat.py /tmp/patch_vllm_agent_compat.py
+RUN python3 /tmp/patch_vllm_agent_compat.py --self-test \
+    && python3 /tmp/patch_vllm_agent_compat.py \
+    && rm -f /tmp/patch_vllm_agent_compat.py
+
+RUN python3 -c "import torch, vllm, aiter; assert torch.version.hip; print('ROCm', torch.version.hip, 'vLLM', vllm.__version__, 'AITER OK')"

@@ -1,38 +1,24 @@
 # Segurança da implantação
 
-## Superfície de rede
+## Rede
 
-O padrão continua `BIND_ADDRESS=127.0.0.1`. O vLLM não publica sua porta diretamente no host; Nginx encaminha somente `/v1/` e caminhos auxiliares como `/invocations` ficam bloqueados no gateway.
-
-Para acesso remoto, a ordem preferida é VNet/IP privado ou VPN, depois NSG/allowlist. Exposição à internet deve adicionar HTTPS/TLS e restrição de origem; não abra TCP/8000 para `0.0.0.0/0` em HTTP simples.
+`BIND_ADDRESS=127.0.0.1` continua sendo o padrão. Apenas o Nginx publica a porta e o gateway encaminha somente `/v1/`. Para acesso remoto, prefira VNet/IP privado ou VPN. Não exponha HTTP/8000 para `0.0.0.0/0`.
 
 ## Credenciais
 
-A API key é gerada aleatoriamente e o `.env` operacional fica em:
+A API key é gerada aleatoriamente. O `.env` operacional fica em `/opt/glm53-complete/.env` com modo `600`. `glm-info` mostra a chave por conveniência; não compartilhe essa saída.
 
-```text
-/opt/glm53-complete/.env
-```
+## Imagens e checkpoint
 
-com modo `600`. `glm-info` mostra a chave deliberadamente por conveniência; não compartilhe a saída. `glm-manage diagnose` não deve imprimir a API key nem o HF token.
+O checkpoint, Nginx e as duas bases vLLM são fixados por commit/digest. O preflight rejeita `MODEL_REVISION=main` e `VLLM_BASE_IMAGE` sem digest após o perfil ser resolvido.
 
-## Imagens e modelo
+## Containers
 
-Entradas principais são fixadas para impedir mudanças silenciosas:
+Nenhum perfil usa `privileged: true`.
 
-```text
-MODEL_REVISION=187fb9fff6319062325ff825627ef6db084d9bc6
-VLLM_BASE_IMAGE=vllm/vllm-openai@sha256:2286e8533ca8b6bc777594bae30524f1426ba46ca21797524e06df6a94b06635
-NGINX_IMAGE=nginx@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
-VLLM_SOURCE_REF=2cf0a6915ce544dc493a0990f2ea38d81601128a
-DEEPGEMM_REF=8b1392b978f5a03c828dd1711090d7fb50958b8a
-```
+No NVIDIA, o runtime usa GPU reservation + `ipc: host`.
 
-O preflight rejeita `MODEL_REVISION=main` e imagens base sem digest neste perfil.
-
-## Container
-
-O vLLM usa GPUs e `ipc: host`, porém não `privileged: true`. Os caches persistentes são montados explicitamente. O DeepGEMM tem cache JIT próprio em `/var/lib/glm53-full/deepgemm-cache`.
+No ROCm, o vLLM exige `/dev/kfd`, `/dev/dri`, `SYS_PTRACE`, `seccomp=unconfined` e grupo `video`, conforme a documentação oficial do container ROCm. Esses privilégios são mais amplos que um container comum, portanto o host deve ser dedicado ao serviço e não deve executar workloads não confiáveis no mesmo daemon Docker.
 
 ## Mídia remota / SSRF
 
@@ -43,24 +29,18 @@ ALLOWED_MEDIA_DOMAIN=media.invalid
 VLLM_MEDIA_URL_ALLOW_REDIRECTS=0
 ```
 
-Isso mantém URLs remotas efetivamente bloqueadas. Só libere um domínio quando a aplicação realmente precisar de mídia remota e preserve redirects desativados sempre que possível.
+## Operações
 
-## Compatibilidade de agentes
+Instalação e comandos mutáveis usam `flock`. `glm-manage update` constrói e valida uma candidata antes da troca e tenta rollback com healthcheck profundo se algo falhar.
 
-O runtime derivado normaliza `assistant.content=null + tool_calls` antes do template. Também rejeita as flags legadas `enable_thinking` e `thinking`, que podem provocar vazamento de reasoning no GLM-5.3. O smoke test falha se detectar tags `<think>` em conteúdo normal ou streaming.
+## Snapshot
 
-## Operações concorrentes
+Após instalar, scripts/configuração operacionais ficam em `/opt/glm53-complete`, reduzindo dependência do clone Git.
 
-Instalação e comandos mutáveis usam `/var/lock/glm53-complete.lock` com `flock`. O objetivo é impedir updates/restarts concorrentes sobre a mesma imagem e o mesmo conjunto de containers.
+## Spot e persistência
 
-## Update / rollback
+Em VM Spot, não trate o NVMe temporário como armazenamento durável. `HF_CACHE_DIR` deve apontar para disco persistente se a intenção é evitar novo download de ~893 GB após interrupção/desalocação.
 
-`start`, `restart` e `apply` não puxam imagens. `glm-manage update` constrói uma candidata, valida-a e só então promove. Falha durante `docker compose up`, healthcheck ou smoke test entra no caminho de rollback quando existe imagem anterior. O rollback é confirmado por inferência real (`healthcheck --deep`), não apenas por `/v1/models`.
+## GitHub
 
-## Snapshot operacional
-
-Depois da instalação, scripts/configuração ficam em `/opt/glm53-complete`. Isso remove a dependência operacional do clone Git e evita que apagar/mover a pasta original quebre o bind mount do Nginx ou os comandos globais.
-
-## Branch principal
-
-A proteção da branch é uma configuração do próprio GitHub, não do código dentro do repositório. Recomenda-se exigir o workflow `GLM 5.3 complete server CI` antes de aceitar alterações em `main`. O código não deve afirmar que essa proteção está ativa sem verificação na configuração do repositório.
+Proteção da branch `main` continua sendo configuração administrativa externa ao código.

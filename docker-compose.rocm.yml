@@ -1,0 +1,45 @@
+services:
+  vllm:
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+    environment:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+    command:
+      - "${MODEL_ID:-zai-org/GLM-5.3}"
+      - --revision
+      - "${MODEL_REVISION}"
+      - --tokenizer-revision
+      - "${MODEL_REVISION}"
+      - --tensor-parallel-size
+      - "${TENSOR_PARALLEL_SIZE:-8}"
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-524288}"
+      - --max-num-seqs
+      - "${MAX_NUM_SEQS:-32}"
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.80}"
+      - --kv-cache-dtype
+      - "${KV_CACHE_DTYPE:-fp8_e4m3}"
+      - --speculative-config
+      - "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_SPECULATIVE_TOKENS:-5}}"
+      - --linear-backend
+      - aiter
+      - --moe-backend
+      - aiter
+      - --tool-call-parser
+      - glm47
+      - --enable-auto-tool-choice
+      - --reasoning-parser
+      - glm45
+      - --served-model-name
+      - "${SERVED_MODEL_NAME:-glm-5.3}"
+      - --allowed-media-domains
+      - "${ALLOWED_MEDIA_DOMAIN:-media.invalid}"
