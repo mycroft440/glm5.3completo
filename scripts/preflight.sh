@@ -201,4 +201,4 @@ for device in "${!REQUIRED_GIB[@]}"; do
   log "Disco OK em ${device}: ${free} GiB livres para ${FS_LABELS[$device]} (mínimo ${required} GiB)."
 done
 
-log "Pré-validação OK: perfil=${ACCELERATOR_PROFILE}; GPUs=${EXPECTED_GPU_COUNT}; TP=${TP_SIZE}; RAM=${HOST_RAM_GIB} GiB; contexto=${MAX_LEN}; seqs=${MAX_SEQS}."
+log "Pré-validação OK: perfil=${ACCELERATOR_PROFILE}; GPUs=${EXPECTED_GPU_COUNT}; TP=${TP_SIZE}; RAM=${HOST_RAM_GIB} GiB; contexto=${MAX_LEN}; seqs=${MAX_SEQS}; MTP=${MTP_TOKENS}; timeout=${READY_TIMEOUT}s."
