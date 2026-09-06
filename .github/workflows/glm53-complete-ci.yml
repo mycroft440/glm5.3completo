@@ -103,7 +103,7 @@ jobs:
             --build-arg 'VLLM_BASE_IMAGE=vllm/vllm-openai-rocm@sha256:e0a3b2bd3fe7ec563916c3a5d949898d133458c18d6b2f460c906885cfb32032' \
             -f Dockerfile.rocm \
             -t glm53-ci-rocm .
-          docker run --rm --entrypoint python3 glm53-ci-rocm -c "import torch,vllm,aiter; assert torch.version.hip; print(torch.version.hip, vllm.__version__, aiter.__file__)"
+          docker run --rm --entrypoint python3 glm53-ci-rocm -c "import importlib.util,torch,vllm; assert torch.version.hip; assert importlib.util.find_spec('aiter') is not None; print(torch.version.hip, vllm.__version__, 'AITER package present')"
 
       - name: Storage and XGMI guards
         run: |
@@ -112,6 +112,8 @@ jobs:
           grep -F -- 'xgmi_hive_id' scripts/preflight.sh
           grep -F -- '--showtopotype' scripts/preflight.sh
           grep -F -- 'Microsoft NVMe Direct Disk' scripts/preflight.sh
+          grep -F -- 'lsblk -srno PATH' scripts/preflight.sh
+          grep -F -- 'RAID/LVM' scripts/preflight.sh
           grep -F -- 'Managed Disk persistente' scripts/preflight.sh
 
       - name: Global launchers and snapshot guards
