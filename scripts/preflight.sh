@@ -72,9 +72,20 @@ base_block_device() {
 }
 
 is_known_azure_local_device() {
-  local source_dev="$1" source_base link link_target link_base model
+  local source_dev="$1" member member_resolved member_base link link_target link_base model
+  local -a source_members=() azure_local_bases=()
   [[ "$source_dev" == /dev/* ]] || return 1
-  source_base="$(base_block_device "$source_dev")"
+  source_dev="$(readlink -f -- "$source_dev" 2>/dev/null || printf '%s' "$source_dev")"
+
+  # Walk the entire block-device graph instead of following one PKNAME chain.
+  # Azure MI300X commonly assembles local NVMe as mdraid/RAID0; LVM is also
+  # possible. Any ephemeral physical member makes the model filesystem unsafe.
+  mapfile -t source_members < <(
+    {
+      printf '%s\n' "$source_dev"
+      lsblk -srno PATH "$source_dev" 2>/dev/null || true
+    } | awk 'NF' | sort -u
+  )
 
   shopt -s nullglob
   for link in \
@@ -86,16 +97,27 @@ is_known_azure_local_device() {
     [[ -e "$link" || -L "$link" ]] || continue
     link_target="$(readlink -f -- "$link" 2>/dev/null || true)"
     [[ -n "$link_target" ]] || continue
-    link_base="$(base_block_device "$link_target")"
-    if [[ "$source_base" == "$link_base" ]]; then
-      shopt -u nullglob
-      return 0
-    fi
+    azure_local_bases+=("$(base_block_device "$link_target")")
   done
   shopt -u nullglob
 
-  model="$(lsblk -dn -o MODEL "$source_base" 2>/dev/null | head -n1 | xargs || true)"
-  [[ "$model" == *"Microsoft NVMe Direct Disk"* ]]
+  for member in "${source_members[@]}"; do
+    [[ "$member" == /dev/* ]] || continue
+    member_resolved="$(readlink -f -- "$member" 2>/dev/null || printf '%s' "$member")"
+    member_base="$(base_block_device "$member_resolved")"
+
+    for link_base in "${azure_local_bases[@]}"; do
+      [[ "$member_base" == "$link_base" ]] && return 0
+    done
+
+    # Check both the graph node and its base device. The former catches leaf
+    # NVMe members returned by lsblk -s; the latter also catches partitions.
+    model="$(lsblk -dn -o MODEL "$member_resolved" 2>/dev/null | head -n1 | xargs || true)"
+    [[ "$model" == *"Microsoft NVMe Direct Disk"* ]] && return 0
+    model="$(lsblk -dn -o MODEL "$member_base" 2>/dev/null | head -n1 | xargs || true)"
+    [[ "$model" == *"Microsoft NVMe Direct Disk"* ]] && return 0
+  done
+  return 1
 }
 
 validate_model_storage() {
@@ -110,9 +132,9 @@ validate_model_storage() {
     die "Os pesos estão no mesmo filesystem do sistema (${storage_source}). Anexe um Managed Disk persistente de pelo menos 2 TiB e monte-o em ${MODEL_STORAGE_PATH} antes de instalar."
   fi
   if [[ "$REJECT_AZURE_LOCAL_STORAGE" == "1" ]] && is_known_azure_local_device "$storage_source"; then
-    die "${HF_CACHE_PATH} está em disco local/resource efêmero do Azure (${storage_source}). Use Managed Disk persistente; Spot/deallocate pode apagar o NVMe local."
+    die "${HF_CACHE_PATH} está em disco local/resource efêmero do Azure (${storage_source}), inclusive possivelmente via RAID/LVM. Use Managed Disk persistente; Spot/deallocate pode apagar o NVMe local."
   fi
-  log "Armazenamento do modelo: ${storage_source} em ${MODEL_STORAGE_PATH}; separado do root e não identificado como Azure local efêmero."
+  log "Armazenamento do modelo: ${storage_source} em ${MODEL_STORAGE_PATH}; separado do root e sem membros Azure locais efêmeros detectados."
 }
 
 validate_nvidia() {
