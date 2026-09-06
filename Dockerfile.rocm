@@ -8,4 +8,8 @@ RUN python3 /tmp/patch_vllm_agent_compat.py --self-test \
     && python3 /tmp/patch_vllm_agent_compat.py \
     && rm -f /tmp/patch_vllm_agent_compat.py
 
-RUN python3 -c "import torch, vllm, aiter; assert torch.version.hip; print('ROCm', torch.version.hip, 'vLLM', vllm.__version__, 'AITER OK')"
+# AITER detects the native gfx architecture during import, so importing it while
+# building on a CPU-only CI runner is expected to fail. Verify that ROCm/vLLM
+# are present and that the AITER package exists; the installer later imports
+# AITER with /dev/kfd and the real MI300X devices attached.
+RUN python3 -c "import importlib.util, torch, vllm; assert torch.version.hip; assert importlib.util.find_spec('aiter') is not None; print('ROCm', torch.version.hip, 'vLLM', vllm.__version__, 'AITER package OK')"
