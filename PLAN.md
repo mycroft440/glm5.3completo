@@ -1,47 +1,54 @@
 # Plano de implantação — GLM-5.3 completo
 
-## Objetivo atual
+## Objetivo
 
-Priorizar o menor custo no Azure usando **`Standard_ND96isr_MI300X_v5` Spot**, sem remover o perfil H200 já auditado.
+Servidor de inferência `zai-org/GLM-5.3` por API OpenAI, com dois perfis suportados: MI300X/ROCm como opção econômica e H200/CUDA como fallback.
 
-## Baseline MI300X
+## Antes de criar a VM
 
-- 8× MI300X 192 GB, TP=8.
-- Azure image: `microsoft-dsvm:ubuntu-hpc:2404-rocm:24.04.2026072801`.
-- vLLM 0.28.0 ROCm oficial fixado por digest.
-- AITER habilitado para linear + MoE.
-- KV `fp8_e4m3`, MTP=5.
-- contexto 524.288; 32 sequências; GPU utilization 0.80.
-- checkpoint fixado.
-- API local por padrão, Nginx apenas `/v1/`.
-- caches persistentes e snapshot `/opt/glm53-complete`.
+- escolher `Standard_ND96isr_MI300X_v5` Spot para menor custo, quando houver quota/capacidade;
+- usar a imagem Azure HPC ROCm recomendada;
+- anexar **Managed Disk persistente >=2 TiB**;
+- montar esse disco em `/var/lib/glm53-full` antes de executar `install.sh`;
+- não usar o NVMe local como única cópia dos pesos.
 
 ## Concluído no código
 
-- [x] detecção automática ROCm/NVIDIA;
-- [x] Compose base + overrides isolados;
-- [x] Dockerfile ROCm;
-- [x] preflight MI300X/gfx942;
-- [x] validação container ROCm/AITER;
-- [x] status/diagnose/info profile-aware;
-- [x] update/rollback usando o Compose do perfil correto;
-- [x] perfil H200 preservado;
-- [x] documentação Azure MI300X atualizada;
-- [x] CI cobrindo os dois perfis.
+- [x] Detecção automática MI300X/H200.
+- [x] ROCm + AITER / CUDA + DeepGEMM em perfis separados.
+- [x] Modelo fixado em `aca966e4e02791568aa6a4ced368624b3d897f42`.
+- [x] Preservação de tuning em reinstalações no mesmo perfil.
+- [x] Preflight de RAM, VRAM, drivers e storage.
+- [x] Rejeição do root filesystem e Azure local/resource disk para pesos.
+- [x] Validação MI300X por gfx942 + VRAM + XGMI hive comum + topologia XGMI.
+- [x] Tool calling multi-turn e regressão `content=null`.
+- [x] Chat low/max e streaming.
+- [x] Smoke test `/v1/responses`.
+- [x] Build real da imagem ROCm em CI para push em `main`.
+- [x] Azure Spot watcher via Scheduled Events/`Preempt`.
+- [x] Snapshot operacional em `/opt/glm53-complete`.
+- [x] Update com candidata e rollback.
+- [x] Timeout inicial de 4 h para novas instalações.
 
-## Pendente em MI300X real
+## Validação em MI300X real
 
-- [ ] criar `Standard_ND96isr_MI300X_v5` Spot;
-- [ ] usar Ubuntu HPC ROCm 24.04 recomendado;
-- [ ] montar disco persistente de pelo menos 2 TiB;
-- [ ] executar `sudo ./install.sh`;
-- [ ] confirmar 8× gfx942 e AITER dentro do container;
-- [ ] carregar ~893 GB;
-- [ ] executar `glm-manage wait` e `glm-manage test`;
-- [ ] testar 524k de contexto e MTP=5;
-- [ ] stress de concorrência/throughput;
-- [ ] simular reboot/interrupção Spot e confirmar cache persistente.
+- [ ] confirmar 8× gfx942 e um único XGMI hive;
+- [ ] confirmar `Dockerfile.rocm`/AITER no host Azure real;
+- [ ] baixar e carregar o checkpoint sem OOM;
+- [ ] `glm-manage wait`;
+- [ ] `glm-manage test` completo, incluindo `/v1/responses`;
+- [ ] stress prolongado em TP8/XGMI;
+- [ ] medir memória e ajustar contexto/sequências sem que reinstalação apague tuning;
+- [ ] reboot com Managed Disk montado por UUID/fstab;
+- [ ] eviction Spot real e confirmação do `spot-preempt.log`;
+- [ ] confirmar retomada sem novo download integral dos pesos.
 
-## Critério de aprovação
+## Validação H200
 
-Produção só depois de a bateria real acima passar sem OOM, erro ROCm/RCCL/AITER, vazamento de reasoning ou quebra em tools/streaming.
+- [ ] repetir smoke/stress no perfil NVIDIA;
+- [ ] observar o risco conhecido de sparse-decode/FlashMLA do vLLM 0.28.0;
+- [ ] manter `MAX_NUM_BATCHED_TOKENS=8192` até runtime estável com fix compilado.
+
+## GitHub
+
+Fora do código: habilitar branch protection na `main` e tornar `GLM 5.3 complete server CI` obrigatório.

@@ -24,7 +24,10 @@ jobs:
       - name: GLM frontend patch self-test
         run: python3 scripts/patch_vllm_agent_compat.py --self-test
 
-      - name: Render ROCm profile
+      - name: Spot watcher self-test
+        run: bash scripts/spot-watch.sh --self-test
+
+      - name: Render ROCm profile and preserve tuning
         run: |
           cp .env.example .env
           sed -i 's/^API_KEY=.*/API_KEY=ci-test-key/' .env
@@ -42,6 +45,19 @@ jobs:
           grep -F -- '524288' /tmp/rocm.yml
           grep -F -- 'fp8_e4m3' /tmp/rocm.yml
           grep -F -- 'num_speculative_tokens' /tmp/rocm.yml
+
+          sed -i 's/^MAX_MODEL_LEN=.*/MAX_MODEL_LEN=400000/' .env
+          sed -i 's/^MAX_NUM_SEQS=.*/MAX_NUM_SEQS=20/' .env
+          sed -i 's/^GPU_MEMORY_UTILIZATION=.*/GPU_MEMORY_UTILIZATION=0.76/' .env
+          ENV_FILE="$PWD/.env" bash scripts/apply-profile.sh rocm
+          grep -F 'MAX_MODEL_LEN=400000' .env
+          grep -F 'MAX_NUM_SEQS=20' .env
+          grep -F 'GPU_MEMORY_UTILIZATION=0.76' .env
+
+          ENV_FILE="$PWD/.env" bash scripts/apply-profile.sh nvidia
+          grep -F 'MAX_MODEL_LEN=131072' .env
+          grep -F 'MAX_NUM_SEQS=8' .env
+          grep -F 'GPU_MEMORY_UTILIZATION=0.90' .env
 
       - name: Render NVIDIA profile
         run: |
@@ -62,7 +78,7 @@ jobs:
         run: |
           grep -F -- 'sha256:e0a3b2bd3fe7ec563916c3a5d949898d133458c18d6b2f460c906885cfb32032' .env.example Dockerfile.rocm scripts/apply-profile.sh
           grep -F -- 'sha256:2286e8533ca8b6bc777594bae30524f1426ba46ca21797524e06df6a94b06635' .env.example Dockerfile scripts/apply-profile.sh
-          grep -F -- '187fb9fff6319062325ff825627ef6db084d9bc6' .env.example
+          grep -F -- 'aca966e4e02791568aa6a4ced368624b3d897f42' .env.example install.sh
           grep -F -- '8b1392b978f5a03c828dd1711090d7fb50958b8a' Dockerfile
           grep -F -- 'patch_vllm_agent_compat.py' Dockerfile Dockerfile.rocm
           if grep -R -Fq -- 'privileged: true' docker-compose*.yml; then
@@ -79,12 +95,31 @@ jobs:
             --build-arg 'VLLM_BASE_IMAGE=vllm/vllm-openai-rocm@sha256:e0a3b2bd3fe7ec563916c3a5d949898d133458c18d6b2f460c906885cfb32032' \
             -f Dockerfile.rocm .
 
+      - name: Build ROCm runtime image for real
+        if: github.event_name != 'pull_request'
+        timeout-minutes: 45
+        run: |
+          docker build \
+            --build-arg 'VLLM_BASE_IMAGE=vllm/vllm-openai-rocm@sha256:e0a3b2bd3fe7ec563916c3a5d949898d133458c18d6b2f460c906885cfb32032' \
+            -f Dockerfile.rocm \
+            -t glm53-ci-rocm .
+          docker run --rm --entrypoint python3 glm53-ci-rocm -c "import torch,vllm,aiter; assert torch.version.hip; print(torch.version.hip, vllm.__version__, aiter.__file__)"
+
+      - name: Storage and XGMI guards
+        run: |
+          grep -F -- 'REQUIRE_SEPARATE_MODEL_FILESYSTEM=1' .env.example
+          grep -F -- 'REJECT_AZURE_LOCAL_MODEL_STORAGE=1' .env.example
+          grep -F -- 'xgmi_hive_id' scripts/preflight.sh
+          grep -F -- '--showtopotype' scripts/preflight.sh
+          grep -F -- 'Microsoft NVMe Direct Disk' scripts/preflight.sh
+          grep -F -- 'Managed Disk persistente' scripts/preflight.sh
+
       - name: Global launchers and snapshot guards
         run: |
           test -x info
           grep -F -- 'INSTALL_DIR="${GLM_INSTALL_DIR:-/opt/glm53-complete}"' install.sh
           grep -F -- 'cat >/usr/local/bin/glm-manage' install.sh
-          grep -F -- 'exec "$INSTALL_DIR/manage.sh"' install.sh
+          grep -F -- 'ExecStart=${INSTALL_DIR}/scripts/spot-watch.sh' install.sh
           grep -F -- 'name: glm53-complete' docker-compose.yml
           grep -F -- 'compose()' scripts/lib.sh
 
@@ -92,6 +127,8 @@ jobs:
         run: |
           grep -F -- 'GLM MAX OK' test-api.sh
           grep -F -- 'GLM_MAX_REASONING_OK' test-api.sh
+          grep -F -- 'RESPONSES_OK' test-api.sh
+          grep -F -- '/v1/responses' test-api.sh
           grep -F -- 'TOOL_LOOP_OK' test-api.sh
           grep -F -- 'content:null' test-api.sh
           grep -F -- 'enable_thinking:false' test-api.sh

@@ -14,6 +14,8 @@ OWNER_GROUP="$(id -gn "$OWNER_USER")"
 COMPOSE_VERSION="${DOCKER_COMPOSE_VERSION:-v5.5.0}"
 INSTALL_DIR="${GLM_INSTALL_DIR:-/opt/glm53-complete}"
 LOCK_FILE="/var/lock/glm53-complete.lock"
+OLD_DEFAULT_MODEL_REVISION="187fb9fff6319062325ff825627ef6db084d9bc6"
+CURRENT_MODEL_REVISION="aca966e4e02791568aa6a4ced368624b3d897f42"
 
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl gnupg jq openssl rsync util-linux pciutils
@@ -32,14 +34,26 @@ if [[ ! -f .env ]]; then
   log "Arquivo .env criado."
 fi
 
+set_env_value() {
+  local key="$1" value="$2"
+  if grep -qE "^${key}=" .env; then
+    sed -i "s#^${key}=.*#${key}=${value}#" .env
+  else
+    printf '%s=%s\n' "$key" "$value" >> .env
+  fi
+}
+
+# Migrate only the exact model pin that was the previous repository default.
+# Custom user pins remain untouched.
+CURRENT_PIN="$(grep -E '^MODEL_REVISION=' .env | head -n1 | cut -d= -f2- || true)"
+if [[ -z "$CURRENT_PIN" || "$CURRENT_PIN" == "$OLD_DEFAULT_MODEL_REVISION" || "$CURRENT_PIN" == "main" ]]; then
+  set_env_value MODEL_REVISION "$CURRENT_MODEL_REVISION"
+  log "Checkpoint atualizado para o chat template oficial corrigido: ${CURRENT_MODEL_REVISION}."
+fi
+
 CURRENT_KEY="$(grep -E '^API_KEY=' .env | head -n1 | cut -d= -f2- || true)"
 if [[ -z "$CURRENT_KEY" || "$CURRENT_KEY" == "CHANGE_ME" ]]; then
-  GENERATED_KEY="$(openssl rand -hex 32)"
-  if grep -q '^API_KEY=' .env; then
-    sed -i "s/^API_KEY=.*/API_KEY=${GENERATED_KEY}/" .env
-  else
-    printf '\nAPI_KEY=%s\n' "$GENERATED_KEY" >> .env
-  fi
+  set_env_value API_KEY "$(openssl rand -hex 32)"
   log "API key segura gerada automaticamente."
 fi
 
@@ -135,9 +149,10 @@ if getent group docker >/dev/null 2>&1; then
   chmod 0660 "$LOCK_FILE"
 fi
 
+MODEL_STORAGE_PATH="${MODEL_STORAGE_ROOT:-/var/lib/glm53-full}"
 HF_CACHE_PATH="${HF_CACHE_DIR:-/var/lib/glm53-full/huggingface}"
 VLLM_CACHE_PATH="${VLLM_CACHE_DIR:-/var/lib/glm53-full/vllm-cache}"
-mkdir -p "$HF_CACHE_PATH" "$VLLM_CACHE_PATH"
+mkdir -p "$MODEL_STORAGE_PATH" "$HF_CACHE_PATH" "$VLLM_CACHE_PATH"
 chown "$OWNER_USER:$OWNER_GROUP" "$HF_CACHE_PATH" "$VLLM_CACHE_PATH"
 chmod 700 "$HF_CACHE_PATH" "$VLLM_CACHE_PATH"
 
@@ -148,6 +163,7 @@ if [[ "$ACCELERATOR_PROFILE" == "nvidia" ]]; then
   chmod 700 "$DG_CACHE_PATH"
 fi
 
+# Fail before downloading/building if model storage is root/ephemeral or hardware is invalid.
 "$ROOT_DIR/scripts/preflight.sh"
 compose config >/dev/null
 
@@ -201,6 +217,48 @@ MANAGE_WRAPPER
   chmod 0755 /usr/local/bin/glm-manage
 fi
 
+configure_spot_watch() {
+  local setting="${SPOT_WATCH_ENABLED:-auto}" metadata="" eviction_policy="" enable_watch=0
+  case "$setting" in auto|0|1) ;; *) die "SPOT_WATCH_ENABLED deve ser auto, 0 ou 1." ;; esac
+  metadata="$(curl --noproxy '*' -fsS --max-time 3 -H Metadata:true \
+    'http://169.254.169.254/metadata/instance?api-version=2025-04-07' 2>/dev/null || true)"
+  if [[ -n "$metadata" ]]; then
+    eviction_policy="$(printf '%s\n' "$metadata" | jq -r '.compute.evictionPolicy // empty' 2>/dev/null || true)"
+  fi
+  if [[ "$setting" == "1" || ( "$setting" == "auto" && -n "$eviction_policy" ) ]]; then
+    enable_watch=1
+  fi
+
+  if [[ "$enable_watch" == "1" ]]; then
+    cat >/etc/systemd/system/glm53-spot-watch.service <<UNIT
+[Unit]
+Description=GLM-5.3 Azure Spot eviction watcher
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=${INSTALL_DIR}/scripts/spot-watch.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+    systemctl enable --now glm53-spot-watch.service
+    log "Azure Spot watcher habilitado (evictionPolicy=${eviction_policy:-forçado})."
+  else
+    systemctl disable --now glm53-spot-watch.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/glm53-spot-watch.service
+    systemctl daemon-reload
+    log "Spot watcher não habilitado; IMDS não indicou VM Spot."
+  fi
+}
+
+configure_spot_watch
+
 cat <<MSG
 
 Instalação iniciada com sucesso.
@@ -215,8 +273,8 @@ A carga do modelo continua em segundo plano. Comandos:
   glm-manage test
   glm-info
 
-Arquivos operacionais persistentes:
-  ${INSTALL_DIR}
+Armazenamento do modelo: ${MODEL_STORAGE_PATH}
+Arquivos operacionais: ${INSTALL_DIR}
 
 O painel completo será exibido agora. Status pode aparecer OFFLINE enquanto os pesos carregam.
 MSG

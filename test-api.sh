@@ -38,6 +38,15 @@ MAX_RESPONSE="$(curl --fail-with-body -sS --max-time 900 "${ORIGIN}/v1/chat/comp
 printf '%s\n' "$MAX_RESPONSE" | jq .
 assert_clean_content "$MAX_RESPONSE" "GLM_MAX_REASONING_OK" "Chat max"
 
+log "Testando OpenAI Responses API..."
+RESPONSES_RESPONSE="$(curl --fail-with-body -sS --max-time 600 "${ORIGIN}/v1/responses" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer ${API_KEY}" \
+  -d "$(jq -nc --arg model "${SERVED_MODEL_NAME:-glm-5.3}" '{model:$model,input:[{role:"user",content:"Responda de forma curta e inclua exatamente RESPONSES_OK."}],max_output_tokens:256,reasoning:{effort:"low"}}')")"
+printf '%s\n' "$RESPONSES_RESPONSE" | jq .
+RESPONSES_TEXT="$(printf '%s\n' "$RESPONSES_RESPONSE" | jq -r '[.output[]? | select(.type=="message") | .content[]? | select(.type=="output_text") | .text] | join("")')"
+[[ "$RESPONSES_TEXT" == *"RESPONSES_OK"* ]] || die "Responses API não retornou RESPONSES_OK."
+[[ "$RESPONSES_TEXT" != *"<think"* && "$RESPONSES_TEXT" != *"</think>"* ]] || die "Responses API vazou tags de raciocínio."
+
 log "Confirmando rejeição das flags antigas de thinking..."
 LEGACY_BODY="$TMPDIR_TEST/legacy.json"
 status="$(curl -sS --max-time 60 -o "$LEGACY_BODY" -w '%{http_code}' "${ORIGIN}/v1/chat/completions" \
@@ -91,4 +100,4 @@ STREAM_CONTENT="$(grep '^data: ' "$STREAM_FILE" | sed 's/^data: //' | grep -v '^
 [[ "$STREAM_CONTENT" == *"STREAM_OK"* ]] || die "Streaming não retornou o conteúdo esperado STREAM_OK."
 [[ "$STREAM_CONTENT" != *"<think"* && "$STREAM_CONTENT" != *"</think>"* ]] || die "Streaming vazou tags de raciocínio no conteúdo."
 
-log "Smoke test completo OK: auth, gateway, models, low/max reasoning, guard de thinking, tools multi-turn e streaming."
+log "Smoke test completo OK: auth, gateway, models, Chat low/max, Responses API, guard de thinking, tools multi-turn e streaming."

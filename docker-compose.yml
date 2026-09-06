@@ -10,7 +10,7 @@ services:
       HF_HOME: /root/.cache/huggingface
       HF_TOKEN: "${HF_TOKEN:-}"
       VLLM_API_KEY: "${API_KEY}"
-      VLLM_ENGINE_READY_TIMEOUT_S: "${VLLM_ENGINE_READY_TIMEOUT_S:-7200}"
+      VLLM_ENGINE_READY_TIMEOUT_S: "${VLLM_ENGINE_READY_TIMEOUT_S:-14400}"
       VLLM_MEDIA_URL_ALLOW_REDIRECTS: "${VLLM_MEDIA_URL_ALLOW_REDIRECTS:-0}"
       VLLM_CACHE_ROOT: /root/.cache/vllm
     volumes:

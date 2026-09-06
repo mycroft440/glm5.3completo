@@ -20,11 +20,34 @@ env_set() {
   fi
 }
 
-requested="${1:-$(env_get ACCELERATOR_PROFILE)}"
+configured_profile="$(env_get ACCELERATOR_PROFILE)"
+previous_profile=""
+case "$(env_get VLLM_DOCKERFILE)" in
+  Dockerfile.rocm) previous_profile="rocm" ;;
+  Dockerfile) previous_profile="nvidia" ;;
+  *)
+    case "$configured_profile" in rocm|nvidia) previous_profile="$configured_profile" ;; esac
+    ;;
+esac
+
+requested="${1:-$configured_profile}"
 requested="${requested:-auto}"
 if [[ "$requested" == "auto" ]]; then
   requested="$(detect_accelerator_profile)" || die "Nenhuma GPU suportada detectada. Esperado MI300X/gfx942 ou NVIDIA H200."
 fi
+
+switching_profile=0
+if [[ -n "$previous_profile" && "$previous_profile" != "$requested" ]]; then
+  switching_profile=1
+fi
+
+profile_default() {
+  local key="$1" default_value="$2" current
+  current="$(env_get "$key")"
+  if [[ "$switching_profile" == "1" || -z "$current" || "$current" == "auto" ]]; then
+    env_set "$key" "$default_value"
+  fi
+}
 
 case "$requested" in
   rocm)
@@ -37,11 +60,11 @@ case "$requested" in
     env_set MIN_GPU_MEMORY_MIB "180000"
     env_set REQUIRE_FABRIC_MANAGER "0"
     env_set VLLM_ENABLE_CUDA_COMPATIBILITY "0"
-    env_set MAX_MODEL_LEN "524288"
-    env_set MAX_NUM_SEQS "32"
-    env_set MAX_NUM_BATCHED_TOKENS "0"
-    env_set GPU_MEMORY_UTILIZATION "0.80"
-    env_set KV_CACHE_DTYPE "fp8_e4m3"
+    profile_default MAX_MODEL_LEN "524288"
+    profile_default MAX_NUM_SEQS "32"
+    profile_default MAX_NUM_BATCHED_TOKENS "0"
+    profile_default GPU_MEMORY_UTILIZATION "0.80"
+    profile_default KV_CACHE_DTYPE "fp8_e4m3"
     ;;
   nvidia)
     env_set ACCELERATOR_PROFILE nvidia
@@ -52,25 +75,22 @@ case "$requested" in
     env_set EXPECTED_GPU_ARCH "hopper"
     env_set MIN_GPU_MEMORY_MIB "130000"
     env_set REQUIRE_FABRIC_MANAGER "1"
-    env_set MAX_MODEL_LEN "131072"
-    env_set MAX_NUM_SEQS "8"
-    env_set MAX_NUM_BATCHED_TOKENS "8192"
-    env_set GPU_MEMORY_UTILIZATION "0.90"
-    env_set KV_CACHE_DTYPE "fp8"
+    profile_default MAX_MODEL_LEN "131072"
+    profile_default MAX_NUM_SEQS "8"
+    profile_default MAX_NUM_BATCHED_TOKENS "8192"
+    profile_default GPU_MEMORY_UTILIZATION "0.90"
+    profile_default KV_CACHE_DTYPE "fp8"
 
-    cuda_mode="$(env_get VLLM_ENABLE_CUDA_COMPATIBILITY)"
-    if [[ -z "$cuda_mode" || "$cuda_mode" == "auto" ]]; then
-      if command -v nvidia-smi >/dev/null 2>&1; then
-        driver_version="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1 | tr -d ' ')"
-        driver_major="${driver_version%%.*}"
-        if [[ "$driver_major" =~ ^[0-9]+$ ]] && (( driver_major < 580 )); then
-          env_set VLLM_ENABLE_CUDA_COMPATIBILITY "1"
-        else
-          env_set VLLM_ENABLE_CUDA_COMPATIBILITY "0"
-        fi
+    if command -v nvidia-smi >/dev/null 2>&1; then
+      driver_version="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1 | tr -d ' ')"
+      driver_major="${driver_version%%.*}"
+      if [[ "$driver_major" =~ ^[0-9]+$ ]] && (( driver_major < 580 )); then
+        env_set VLLM_ENABLE_CUDA_COMPATIBILITY "1"
       else
         env_set VLLM_ENABLE_CUDA_COMPATIBILITY "0"
       fi
+    else
+      env_set VLLM_ENABLE_CUDA_COMPATIBILITY "0"
     fi
     ;;
   *)

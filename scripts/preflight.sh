@@ -15,8 +15,11 @@ MIN_DOCKER_FREE_GIB="${MIN_DOCKER_FREE_DISK_GIB:-100}"
 MIN_VLLM_CACHE_FREE_GIB="${MIN_VLLM_CACHE_FREE_DISK_GIB:-30}"
 HF_CACHE_PATH="${HF_CACHE_DIR:-/var/lib/glm53-full/huggingface}"
 VLLM_CACHE_PATH="${VLLM_CACHE_DIR:-/var/lib/glm53-full/vllm-cache}"
+MODEL_STORAGE_PATH="${MODEL_STORAGE_ROOT:-/var/lib/glm53-full}"
+REQUIRE_SEPARATE_STORAGE="${REQUIRE_SEPARATE_MODEL_FILESYSTEM:-1}"
+REJECT_AZURE_LOCAL_STORAGE="${REJECT_AZURE_LOCAL_MODEL_STORAGE:-1}"
 API_LISTEN_PORT="${API_PORT:-8000}"
-READY_TIMEOUT="${VLLM_ENGINE_READY_TIMEOUT_S:-7200}"
+READY_TIMEOUT="${VLLM_ENGINE_READY_TIMEOUT_S:-14400}"
 GPU_UTIL="${GPU_MEMORY_UTILIZATION:-0.80}"
 MTP_TOKENS="${MTP_SPECULATIVE_TOKENS:-5}"
 MAX_LEN="${MAX_MODEL_LEN:-524288}"
@@ -27,6 +30,8 @@ for value_name in TP_SIZE EXPECTED_GPU_COUNT MIN_HOST_RAM MIN_HF_FREE_GIB MIN_DO
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "${value_name} deve ser inteiro positivo; recebido: ${value}."
 done
 [[ "$STRICT_GPU_COUNT_VALUE" =~ ^[01]$ ]] || die "STRICT_GPU_COUNT deve ser 0 ou 1."
+[[ "$REQUIRE_SEPARATE_STORAGE" =~ ^[01]$ ]] || die "REQUIRE_SEPARATE_MODEL_FILESYSTEM deve ser 0 ou 1."
+[[ "$REJECT_AZURE_LOCAL_STORAGE" =~ ^[01]$ ]] || die "REJECT_AZURE_LOCAL_MODEL_STORAGE deve ser 0 ou 1."
 (( API_LISTEN_PORT <= 65535 )) || die "API_PORT deve estar entre 1 e 65535."
 (( EXPECTED_GPU_COUNT >= TP_SIZE )) || die "EXPECTED_GPUS não pode ser menor que TENSOR_PARALLEL_SIZE."
 [[ "$GPU_UTIL" =~ ^(0\.[0-9]+|1(\.0+)?)$ ]] || die "GPU_MEMORY_UTILIZATION inválido: ${GPU_UTIL}."
@@ -46,11 +51,69 @@ awk -v v="$GPU_UTIL" 'BEGIN { exit !(v > 0 && v <= 1) }' || die "GPU_MEMORY_UTIL
 command -v docker >/dev/null 2>&1 || die "Docker não encontrado."
 docker compose version >/dev/null 2>&1 || die "Docker Compose não encontrado."
 docker info >/dev/null 2>&1 || die "Docker daemon não está acessível."
+command -v findmnt >/dev/null 2>&1 || die "findmnt não encontrado."
+command -v lsblk >/dev/null 2>&1 || die "lsblk não encontrado."
 
 MEM_TOTAL_KIB="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
 [[ "$MEM_TOTAL_KIB" =~ ^[0-9]+$ ]] || die "Não foi possível ler a RAM do host."
 HOST_RAM_GIB="$(( MEM_TOTAL_KIB / 1024 / 1024 ))"
 (( HOST_RAM_GIB >= MIN_HOST_RAM )) || die "RAM insuficiente: ${HOST_RAM_GIB} GiB; mínimo ${MIN_HOST_RAM} GiB."
+
+base_block_device() {
+  local dev="$1" parent
+  [[ "$dev" == /dev/* ]] || { printf '%s\n' "$dev"; return 0; }
+  dev="$(readlink -f -- "$dev" 2>/dev/null || printf '%s' "$dev")"
+  while :; do
+    parent="$(lsblk -ndo PKNAME "$dev" 2>/dev/null | head -n1 || true)"
+    [[ -n "$parent" ]] || break
+    dev="/dev/$parent"
+  done
+  printf '%s\n' "$dev"
+}
+
+is_known_azure_local_device() {
+  local source_dev="$1" source_base link link_target link_base model
+  [[ "$source_dev" == /dev/* ]] || return 1
+  source_base="$(base_block_device "$source_dev")"
+
+  shopt -s nullglob
+  for link in \
+    /dev/disk/azure/resource \
+    /dev/disk/azure/resource-part* \
+    /dev/disk/azure/local/by-serial/* \
+    /dev/disk/azure/local/by-index/* \
+    /dev/disk/azure/local/by-name/*; do
+    [[ -e "$link" || -L "$link" ]] || continue
+    link_target="$(readlink -f -- "$link" 2>/dev/null || true)"
+    [[ -n "$link_target" ]] || continue
+    link_base="$(base_block_device "$link_target")"
+    if [[ "$source_base" == "$link_base" ]]; then
+      shopt -u nullglob
+      return 0
+    fi
+  done
+  shopt -u nullglob
+
+  model="$(lsblk -dn -o MODEL "$source_base" 2>/dev/null | head -n1 | xargs || true)"
+  [[ "$model" == *"Microsoft NVMe Direct Disk"* ]]
+}
+
+validate_model_storage() {
+  local storage_source storage_mm root_mm
+  mkdir -p "$MODEL_STORAGE_PATH" "$HF_CACHE_PATH" "$VLLM_CACHE_PATH" || die "Não foi possível criar diretórios de armazenamento."
+  storage_source="$(findmnt -T "$HF_CACHE_PATH" -n -o SOURCE 2>/dev/null || true)"
+  storage_mm="$(findmnt -T "$HF_CACHE_PATH" -n -o MAJ:MIN 2>/dev/null || true)"
+  root_mm="$(findmnt -T / -n -o MAJ:MIN 2>/dev/null || true)"
+  [[ -n "$storage_source" && -n "$storage_mm" && -n "$root_mm" ]] || die "Não foi possível identificar o filesystem de ${HF_CACHE_PATH}."
+
+  if [[ "$REQUIRE_SEPARATE_STORAGE" == "1" && "$storage_mm" == "$root_mm" ]]; then
+    die "Os pesos estão no mesmo filesystem do sistema (${storage_source}). Anexe um Managed Disk persistente de pelo menos 2 TiB e monte-o em ${MODEL_STORAGE_PATH} antes de instalar."
+  fi
+  if [[ "$REJECT_AZURE_LOCAL_STORAGE" == "1" ]] && is_known_azure_local_device "$storage_source"; then
+    die "${HF_CACHE_PATH} está em disco local/resource efêmero do Azure (${storage_source}). Use Managed Disk persistente; Spot/deallocate pode apagar o NVMe local."
+  fi
+  log "Armazenamento do modelo: ${storage_source} em ${MODEL_STORAGE_PATH}; separado do root e não identificado como Azure local efêmero."
+}
 
 validate_nvidia() {
   local expected_pattern="${EXPECTED_GPU_NAME_REGEX:-H200}"
@@ -101,7 +164,7 @@ validate_nvidia() {
 validate_rocm() {
   local expected_arch="${EXPECTED_GPU_ARCH:-gfx942}"
   local min_mem_mib="${MIN_GPU_MEMORY_MIB:-180000}"
-  local gfx_count card_count=0 memory_checked=0 mem_bytes mem_mib vendor card
+  local gfx_count card_count=0 memory_checked=0 mem_bytes mem_mib vendor card hive_path current_hive first_hive="" topo_type
   local -a amd_cards=()
 
   [[ -e /dev/kfd ]] || die "/dev/kfd ausente. Use a imagem Azure Ubuntu HPC ROCm para MI300X."
@@ -135,14 +198,28 @@ validate_rocm() {
         memory_checked=$((memory_checked + 1))
       fi
     fi
+
+    hive_path="$card/device/xgmi_info/xgmi_hive_id"
+    [[ -r "$hive_path" ]] || die "${card} não expõe xgmi_hive_id; Infinity Fabric/XGMI não pôde ser validado."
+    current_hive="$(tr -d '[:space:]' < "$hive_path")"
+    [[ "$current_hive" =~ [1-9a-fA-F] ]] || die "${card} possui XGMI hive id inválido: ${current_hive:-vazio}."
+    if [[ -z "$first_hive" ]]; then
+      first_hive="$current_hive"
+    elif [[ "$current_hive" != "$first_hive" ]]; then
+      die "GPUs MI300X não estão no mesmo XGMI hive: ${first_hive} != ${current_hive}."
+    fi
   done
   if (( memory_checked < EXPECTED_GPU_COUNT )); then
     warn "VRAM não pôde ser confirmada por sysfs em todas as GPUs; a validação dentro do container ROCm será obrigatória."
   fi
 
+  topo_type="$(rocm-smi --showtopotype 2>/dev/null || true)"
+  [[ "$topo_type" == *XGMI* ]] || die "Topologia ROCm não reporta links XGMI/Infinity Fabric."
   rocm-smi --showtopo >/dev/null 2>&1 || die "rocm-smi não conseguiu consultar a topologia Infinity Fabric."
-  log "ROCm OK: ${gfx_count} GPUs ${expected_arch}; dispositivos KFD/DRI e topologia acessíveis."
+  log "ROCm OK: ${gfx_count} GPUs ${expected_arch}; XGMI hive ${first_hive}; Infinity Fabric visível."
 }
+
+validate_model_storage
 
 case "$ACCELERATOR_PROFILE" in
   nvidia)
@@ -160,7 +237,6 @@ case "$ACCELERATOR_PROFILE" in
     ;;
 esac
 
-mkdir -p "$HF_CACHE_PATH" "$VLLM_CACHE_PATH" || die "Não foi possível criar diretórios de cache."
 DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
 [[ -n "$DOCKER_ROOT" ]] || die "Não foi possível descobrir DockerRootDir."
 
