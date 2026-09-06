@@ -1,6 +1,39 @@
 # GLM-5.3 Completo — Azure Server
 
-Servidor do **GLM-5.3 completo** com API compatível com OpenAI. O repositório suporta dois perfis de acelerador e o instalador detecta o hardware automaticamente.
+Servidor pronto para instalar o **GLM-5.3 completo (743B / 39B ativos)** em uma única VM Azure com API compatível com OpenAI. O mesmo instalador detecta automaticamente se a máquina usa **8× AMD MI300X (ROCm/AITER)** ou **8× NVIDIA H200 (CUDA/DeepGEMM)** e aplica o perfil correto sem você precisar editar Docker, vLLM ou os parâmetros do modelo manualmente.
+
+## Instale com este script
+
+```bash
+git clone https://github.com/mycroft440/glm5.3completo.git
+cd glm5.3completo
+sudo ./install.sh
+```
+
+### Como funciona
+
+Ao executar `sudo ./install.sh`, o instalador:
+
+1. identifica automaticamente o acelerador disponível;
+2. se detectar **MI300X / gfx942**, seleciona o perfil `rocm`, vLLM ROCm + AITER, TP=8, KV `fp8_e4m3`, MTP=5 e contexto inicial de 524.288 tokens;
+3. se detectar **H200**, seleciona o perfil `nvidia`, vLLM CUDA + DeepGEMM, TP=8, KV FP8, MTP=5 e contexto inicial de 131.072 tokens;
+4. valida GPUs, RAM, armazenamento, Docker, drivers e topologia antes de iniciar;
+5. gera uma API key automaticamente;
+6. baixa/carrega o checkpoint fixado do GLM-5.3;
+7. sobe vLLM atrás de um gateway Nginx compatível com `/v1` da API OpenAI;
+8. instala os comandos globais `glm-info` e `glm-manage`;
+9. ao final, mostra URL da API, chave, modelo, perfil detectado, GPUs, contexto e demais informações de uso.
+
+Depois da instalação:
+
+```bash
+glm-info
+glm-manage logs
+glm-manage wait
+glm-manage test
+```
+
+`glm-info` mostra rapidamente todas as informações necessárias para conectar outro aplicativo ou agente ao GLM-5.3. `glm-manage test` valida autenticação, chat, reasoning, tool calling multi-turn e streaming.
 
 ## Perfil recomendado para menor custo: Azure MI300X Spot
 
@@ -32,27 +65,6 @@ O perfil H200 anterior continua suportado:
 - TP=8, KV FP8, MTP=5
 - contexto inicial 131.072
 - lote conservador 8.192 tokens
-
-## Instalação
-
-```bash
-git clone https://github.com/mycroft440/glm5.3completo.git
-cd glm5.3completo
-sudo ./install.sh
-```
-
-`install.sh` detecta `gfx942`/MI300X via ROCm ou H200 via NVIDIA, grava `ACCELERATOR_PROFILE=rocm|nvidia`, escolhe a imagem vLLM correta, valida o hardware, constrói o runtime derivado e sobe a API.
-
-Depois:
-
-```bash
-glm-info
-glm-manage logs
-glm-manage wait
-glm-manage test
-```
-
-O painel `glm-info` mostra perfil, runtime, modelo, revisão, URL, API key, contexto, TP, KV cache, MTP, GPUs, caches e comandos.
 
 ## API
 
